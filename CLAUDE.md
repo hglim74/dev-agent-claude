@@ -35,6 +35,7 @@ Flow of the script, top to bottom:
 ## Conventions and gotchas
 
 - The script's control flow depends on Claude editing `plan.md` checkboxes and on log-text markers (`[DECISION_REQUIRED]`, limit-message regexes). Changing prompt wording, marker names, or the checkbox grep patterns (`^[[:space:]]*[-*][[:space:]]+\[...\]`) must be done consistently across the prompt text and the detection functions.
+- Decision detection (`is_decision_required` / `extract_decision_block`) only accepts a *complete* block: opening and closing markers each alone on their own line, with at least one `선택지 N` line inside. A bare mention of the marker in prose must never trigger a prompt, so keep the marker string out of follow-up prompts, and keep the block format in `get_conflict_policy_instruction` in sync with this parser.
 - Exit codes: 0 done, 1 error/step failed after retries, 2 `MAX_STEPS` reached, 3 limit hit with `--no-limit-wait`, 4 paused for a decision.
 - Functions that return values via globals: `CLAUDE_ARGS`, `LAST_CLAUDE_EXIT_CODE`, `USER_DECISION_INPUT`. Under `set -e`, `claude` calls are wrapped in `set +e`/`set -e` and use `PIPESTATUS[0]` because of the `| tee`.
 - `trap '' HUP` is intentional so SSH disconnects don't kill long waits.

@@ -632,8 +632,9 @@ EOF
     cat <<EOF
 [스펙 충돌 및 의사결정 지침 (--on-conflict ${ON_CONFLICT})]
 ${decisions_context}
-- 사소한 구현 세부사항은 기존 코드 컨벤션에 맞춰 스스로 판단해 진행해.
-- 단, 요구사항(Spec) 자체에 모순이 있거나, 기존 핵심 동작을 깨뜨리는 파괴적 변경(Breaking Change), 또는 사용자의 비즈니스 의사결정이 반드시 필요한 중대한 갈림길이 발생하면 임의로 추측해서 소스 코드를 작성하지 마.
+- 사소한 구현 세부사항, 모호하지만 합리적인 기본값이 있는 사항, 기존 코드 컨벤션으로 정해지는 사항은 묻지 말고 스스로 판단해 진행해. 이런 판단은 '${ABS_DECISIONS_FILE}'에 한 줄만 남겨.
+- 결정 요청은 최후의 수단이야. 아래 경우에만 해당해: 요구사항(Spec) 자체가 서로 모순되어 둘을 동시에 만족할 수 없거나, 기존 핵심 동작을 깨뜨리는 파괴적 변경(Breaking Change)이 불가피하거나, 사용자의 비즈니스 의사결정 없이는 어느 쪽으로도 진행할 수 없는 경우. 이때는 임의로 추측해서 소스 코드를 작성하지 마.
+- 위 경우에 해당하지 않으면(충돌이 없으면) 아래 결정 요청 블록과 그 마커 문자열을 절대 출력하거나 언급하지 말고, 그냥 이번 작업을 끝까지 진행해.
 - 중요: 계획 수립(Phase 1) 중 결정이 필요한 사항이 있더라도, 먼저 '${ABS_PLAN_FILE}' 파일 자체는 반드시 Write 도구로 디스크에 실제로 생성해 두고(미결정 단계도 '- [ ] Step N: ...' 체크박스로 포함), 그 다음에 질문을 출력해야 해! 파일을 생성하지 않고 텍스트로만 출력하면 안 돼.
 - 중대한 충돌/결정이 필요한 경우:
   1. '${ABS_PLAN_FILE}' 파일이 디스크에 저장되어 있는지 확인하고, 해당 단계 체크박스를 미완료('- [ ]') 상태로 유지해.
@@ -650,18 +651,31 @@ EOF
 }
 
 # 로그 파일에서 [DECISION_REQUIRED] 블록이 출력되었는지 감지
+#
+# 오탐 방지: 마커를 문장 중간에서 언급만 한 경우는 무시한다. 다음 조건을 모두 만족하는
+# '완결된 블록'이 있을 때만 결정 필요로 판단한다.
+#   - 여는 마커와 닫는 마커가 각각 한 줄을 단독으로 차지 (앞뒤 공백/마크다운 장식 허용)
+#   - 블록 안에 '- 선택지 N' 줄이 하나 이상 존재
 is_decision_required() {
   local log_file="$1"
   if [[ ! -f "$log_file" ]]; then
     return 1
   fi
-  grep -q '\[DECISION_REQUIRED\]' "$log_file"
+  [[ -n "$(extract_decision_block "$log_file")" ]]
 }
 
-# 로그 파일에서 [DECISION_REQUIRED] ... [/DECISION_REQUIRED] 블록 추출
+# 로그 파일에서 마지막 완결된 [DECISION_REQUIRED] ... [/DECISION_REQUIRED] 블록 추출 (없으면 빈 출력)
 extract_decision_block() {
   local log_file="$1"
-  awk '/\[DECISION_REQUIRED\]/{flag=1} flag; /\[\/DECISION_REQUIRED\]/{flag=0}' "$log_file" || true
+  awk '
+    /^[[:space:]>*`_-]*\[DECISION_REQUIRED\][[:space:]*`_]*$/ { blk = 1; n = 0; buf = $0; next }
+    /^[[:space:]>*`_-]*\[\/DECISION_REQUIRED\][[:space:]*`_]*$/ {
+      if (blk && n > 0) last = buf "\n" $0
+      blk = 0; next
+    }
+    blk { buf = buf "\n" $0; if ($0 ~ /선택지[[:space:]]*[0-9]/) n++ }
+    END { if (last != "") print last }
+  ' "$log_file" || true
 }
 
 # ------------------------------------------------------------------------------
@@ -1194,7 +1208,7 @@ ${prompt_text}"
       current_prompt="방금 질문한 스펙 충돌/의사결정 사항에 대해 사용자가 다음과 같이 최종 결정했어:
 [사용자 최종 결정]: ${USER_DECISION_INPUT}
 
-이제 더 이상 [DECISION_REQUIRED] 블록을 출력하지 말고, 반드시 Write 또는 Edit 도구를 호출하여 다음 작업을 실제로 디스크에 반영해줘:
+이제 결정 요청 블록을 다시 출력하지 말고(해당 마커 문자열을 언급하지도 마), 반드시 Write 또는 Edit 도구를 호출하여 다음 작업을 실제로 디스크에 반영해줘:
 1. '${ABS_DECISIONS_FILE}' 파일에 위 최종 결정 사항을 반영해 저장해.
 2. '${ABS_PLAN_FILE}' 파일이 디스크에 실제로 존재하는지 확인하고, 위 결정을 반영한 전체 단계별 체크리스트('- [ ] Step 1: ...' 형식)를 '${ABS_PLAN_FILE}'에 실제로 작성(Write)하거나 수정(Edit)해서 저장해.
 3. 만약 현재 단계별 구현(Phase 2) 중이었다면 해당 단계의 코드 구현과 검증까지 마치고 '${ABS_PLAN_FILE}'의 해당 체크박스를 '- [x]'로 업데이트해."
