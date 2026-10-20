@@ -1581,6 +1581,10 @@ ${CONFLICT_POLICY}"
 
     EXIT_CODE="$LAST_CLAUDE_EXIT_CODE"
 
+    if grep -q "Reached max turns" "$LOG_FILE" 2>/dev/null; then
+      echo -e "${YELLOW}[경고] '${NEXT_SHORT}' 단계 수행 중 최대 턴(${MAX_TURNS})에 도달했습니다. --max-turns 값을 늘려 보세요.${NC}"
+    fi
+
     # 현재 작업 항목이 여전히 미완료(- [ ])로 남아있는지 확인
     STILL_UNCHECKED="false"
     if [[ "$(get_next_task)" == "$NEXT_TASK" ]]; then
