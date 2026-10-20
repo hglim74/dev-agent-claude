@@ -42,6 +42,7 @@ RECOVER_LAST_PLAN="${RECOVER_LAST_PLAN:-false}"
 ON_CONFLICT="${ON_CONFLICT:-ask}"                 # ask | pause | auto
 MAX_STEPS="${MAX_STEPS:-30}"
 MAX_TURNS="${MAX_TURNS:-25}"
+PLAN_MAX_TURNS="${PLAN_MAX_TURNS:-60}"            # Phase 1(계획 수립) 전용 최대 턴 수
 MAX_RETRIES="${MAX_RETRIES:-2}"
 PERMISSION_STRATEGY="${PERMISSION_STRATEGY:-bypass}" # bypass | auto | acceptEdits | allowed
 ALLOWED_TOOLS="${ALLOWED_TOOLS:-Bash,Read,Edit,Write}"
@@ -120,6 +121,7 @@ usage() {
   -f, --plan <파일경로>         계획 파일 경로 (기본값: plan.md)
   -s, --max-steps <숫자>        최대 단계 반복 횟수 (기본값: 30)
   -t, --max-turns <숫자>        단계당 최대 에이전트 턴 수 (--max-turns, 기본값: 25)
+      --plan-turns <숫자>       계획 수립(Phase 1) 최대 턴 수 (기본값: 60)
   -r, --max-retries <숫자>      단계 미완료/오류 시 최대 재시도 횟수 (기본값: 2)
   -p, --perm <모드>             권한 승인 방식 선택 (기본값: bypass)
                                   - bypass      : --dangerously-skip-permissions 사용
@@ -297,6 +299,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -t|--max-turns)
       MAX_TURNS="$2"
+      shift 2
+      ;;
+    --plan-turns)
+      PLAN_MAX_TURNS="$2"
       shift 2
       ;;
     -r|--max-retries)
@@ -1317,6 +1323,8 @@ generate_plan_from_requirements() {
     local backup_file="${LOG_DIR}/$(basename "$PLAN_FILE").bak.$(date +"%Y%m%d_%H%M%S")"
     cp "$ABS_PLAN_FILE" "$backup_file"
     echo -e "${YELLOW}[백업] 기존 '${PLAN_FILE}' 파일을 '${backup_file}'에 백업했습니다.${NC}"
+    # 이전 계획이 남아 있으면 생성 실패를 성공으로 오인하므로 제거
+    rm -f "$ABS_PLAN_FILE"
   fi
 
   local mode_instruction=""
@@ -1359,7 +1367,9 @@ ${conflict_policy}"
   timestamp=$(date +"%Y%m%d_%H%M%S")
   local plan_log="${LOG_DIR}/phase1_planning_${timestamp}.log"
 
-  echo -e "${CYAN}▶ 코드베이스를 분석하고 '${ABS_PLAN_FILE}'을 생성하고 있습니다...${NC}"
+  echo -e "${CYAN}▶ 코드베이스를 분석하고 '${ABS_PLAN_FILE}'을 생성하고 있습니다... (최대 ${PLAN_MAX_TURNS}턴)${NC}"
+  local saved_max_turns="$MAX_TURNS"
+  MAX_TURNS="$PLAN_MAX_TURNS"
   run_claude_with_limit_guard \
     "$active_plan_model" \
     "false" \
@@ -1367,16 +1377,26 @@ ${conflict_policy}"
     "$plan_log" \
     "Phase 1: 계획 수립 (${PLAN_FILE} 생성)"
 
+  if grep -q "Reached max turns" "$plan_log" 2>/dev/null; then
+    echo -e "${YELLOW}[경고] 계획 수립 중 최대 턴(${PLAN_MAX_TURNS})에 도달했습니다. --plan-turns 값을 늘려 보세요.${NC}"
+  fi
+
   # 파일이 지정된 경로에 없으면 탐색 또는 직전 세션(--continue)을 통해 강제 저장 복구
   if ! locate_or_recover_plan_file "$active_plan_model"; then
+    MAX_TURNS="$saved_max_turns"
     echo -e "${RED}[오류] 자동 복구 시도 후에도 '${ABS_PLAN_FILE}' 파일이 생성되지 않았습니다. 로그를 확인해 주세요: ${plan_log}${NC}" >&2
     exit 1
   fi
+  MAX_TURNS="$saved_max_turns"
 
   ensure_checkbox_format
 
   local total_created
   total_created=$(count_remaining_tasks)
+  if [[ "$total_created" -eq 0 ]]; then
+    echo -e "${RED}[오류] 계획 수립 후 미완료 단계('- [ ]')가 0개입니다. 계획 생성이 중단되었을 수 있습니다(턴 부족 등). 로그를 확인해 주세요: ${plan_log}${NC}" >&2
+    exit 1
+  fi
   echo -e "\n${GREEN}[계획 수립 완료] '${PLAN_FILE}'에 총 ${total_created}개의 실행 단계가 준비되었습니다.${NC}"
 
   if [[ "$AUTO_COMMIT" == "true" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
