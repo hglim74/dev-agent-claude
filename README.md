@@ -189,40 +189,42 @@ curl -s -X POST https://slack.com/api/chat.postMessage \
 
 # generate_spec.bash
 
-개략적인 요구사항(한 줄 메모 수준)을 받아 Claude Code CLI로 코드베이스를 분석하고, **개발에 바로 착수할 수 있는 고도화된 요구사항 사양서**를 `spec/` 폴더에 생성하는 스크립트입니다. Slack 연동, 사용량 한도 자동 대기, 파일 생성 복구 등 `run_plan.bash`의 핵심 메커니즘을 그대로 공유합니다.
+개략적인 요구사항(한 줄 메모 수준)을 받아 Claude Code CLI로 코드베이스를 분석하고, **개발에 바로 착수할 수 있는 요구사항 사양서 "문서 세트"**를 `spec/` 폴더에 생성하는 스크립트입니다. Slack 연동, 사용량 한도 자동 대기, 파일 생성 복구 등 `run_plan.bash`의 핵심 메커니즘을 그대로 공유합니다.
 
-1. **초안 생성**: 요구사항(텍스트 / 파일 / stdin)과 현재 코드베이스를 분석해 10개 고정 섹션(개요, 목표/범위, 기능 요구사항, 비기능 요구사항, 데이터/API 설계, 예외 처리, 수용 기준, 테스트 계획, 가정/제약, 미결 이슈)으로 구성된 사양서를 `spec/`에 작성합니다.
-2. **자기 검토/보강(고도화)**: 초안 작성 후 `--refine-passes`(기본 1회)만큼 Claude가 원본 요구사항·코드베이스와 사양서를 다시 대조해 누락된 엣지 케이스, 수용 기준, 모호한 표현을 스스로 보완합니다.
-3. **섹션 누락 보정**: 10개 섹션 중 빠진 게 있으면 기존 내용은 유지한 채 해당 섹션만 보완하도록 재요청합니다(`--max-retries`).
-4. **요구사항 모호성/충돌**: 요구사항 자체가 모순되거나 핵심 비즈니스 결정이 필요한 경우 `run_plan.bash`와 동일한 `[DECISION_REQUIRED]` + `decisions.md` + Slack 흐름으로 처리합니다.
-5. **사용량 한도 자동 대기**: Usage/Rate Limit에 걸리면 해제 시각을 계산해 대기한 뒤 `--continue`로 재개합니다.
-6. **사양서 복구**: 에이전트가 파일을 저장하지 않고 텍스트로만 출력한 경우 자동 탐색·복구하며, `--recover-spec`으로 직전 세션에서 즉시 복구할 수 있습니다.
+1. **문서 계획 수립**: 요구사항과 코드베이스를 분석해 필요한 문서 목록(개요, 기능 요구사항, 데이터/API 설계, 비기능 요구사항, 테스트 계획 등 — 규모에 맞게 가변적)과 `spec/` 아래 폴더 구조를 정하고, `spec-plan.md` 체크리스트로 저장합니다.
+2. **문서별 생성 + 자기 검증**: `spec-plan.md`의 미완료 문서를 하나씩 Claude에게 맡겨 실제 파일로 작성시키고, 같은 호출 안에서 그 문서 자체를 자기 검증·보완한 뒤 체크박스를 완료로 표시합니다. 모든 문서가 끝날 때까지 반복합니다.
+3. **문서간 충돌 검증**: 모든 문서가 완성되면 `spec/` 전체를 다시 읽혀 문서 간 모순(동일 항목에 대한 서로 다른 설명, 용어/ID 불일치, 끊어진 참조 등)을 찾아 직접 수정하게 합니다.
+4. **최종 중복/충돌 검사 및 최적화**: 마지막으로 전체 문서 세트를 한 번 더 검토해 중복 내용을 정리하고 남은 충돌을 해소하며, 문서 목록을 안내하는 `spec/README.md` 인덱스를 만듭니다.
+5. **요구사항 모호성/충돌**: 위 모든 단계에서 요구사항 자체가 모순되거나 핵심 비즈니스 결정이 필요한 경우 `run_plan.bash`와 동일한 `[DECISION_REQUIRED]` + `decisions.md` + Slack 흐름으로 처리합니다.
+6. **사용량 한도 자동 대기**: Usage/Rate Limit에 걸리면 해제 시각을 계산해 대기한 뒤 `--continue`로 재개합니다.
+7. **계획/문서 복구**: 에이전트가 파일을 저장하지 않고 텍스트로만 출력한 경우 자동 탐색·복구하며, `--recover-plan`으로 직전 세션에서 즉시 복구할 수 있습니다.
 
 ## 사용 예
 
 ```bash
-# 요구사항 텍스트 / 파일 / 파이프 → spec/spec_<타임스탬프>.md
+# 요구사항으로 전체 흐름 실행 (계획 → 문서별 생성/검증 → 충돌 검증 → 최적화)
 ./generate_spec.bash "모바일 앱에 푸시 알림 기능 추가"
 ./generate_spec.bash --req-file memo.md
 cat memo.md | ./generate_spec.bash
 
-# 파일명을 직접 지정하고 보강 2회 수행
-./generate_spec.bash --req-file memo.md --name push-notification --refine-passes 2
+# 계획(spec-plan.md + 폴더 구조)만 만들고 검토 후 생성 시작
+./generate_spec.bash --req-file memo.md --plan-only
+./generate_spec.bash                      # 기존 spec-plan.md의 미완료 문서부터 이어서 생성
 
-# 생성 후 내용 확인 + git 커밋
-./generate_spec.bash --req-file memo.md --confirm-spec --auto-commit
+# 계획 확인 후 진행, 완료 시 자동 커밋
+./generate_spec.bash --req-file memo.md --confirm-plan --auto-commit
 
 # 완전 무인 실행: 모호성 발생 시 보수적 기준으로 자율 결정
 ./generate_spec.bash --tmux --on-conflict auto --req-file memo.md
 
-# 사양서 저장이 누락됐을 때 직전 세션에서 복구
-./generate_spec.bash --recover-spec
+# 계획 파일 저장이 누락됐을 때 직전 세션에서 복구
+./generate_spec.bash --recover-plan
 
-# 실제 호출 없이 명령어와 프롬프트만 확인
+# 실제 호출 없이 계획 수립 명령어/프롬프트만 확인
 ./generate_spec.bash --dry-run -q "요구사항"
 
-# 생성된 사양서로 run_plan.bash 구현 시작
-run_plan.bash --req-file spec/push-notification.md
+# 생성된 문서 중 하나로 run_plan.bash 구현 시작
+run_plan.bash --req-file spec/02-functional-requirements.md
 ```
 
 ## 주요 옵션
@@ -230,38 +232,46 @@ run_plan.bash --req-file spec/push-notification.md
 | 옵션 | 설명 |
 |---|---|
 | `-q, --req` / `-i, --req-file` | 요구사항 텍스트 / 파일 |
-| `-d, --spec-dir`, `-n, --name`, `--spec-file` | 저장 폴더(기본 `spec`) / 파일명(확장자 제외) / 전체 경로 직접 지정 |
-| `--append` | 기존 사양서 끝에 새 요구사항 섹션 추가 (기본은 새 파일 생성) |
-| `--refine-passes` | 초안 후 자기 검토·보강 반복 횟수 (기본 1, 0=생략) |
-| `--confirm-spec`, `--recover-spec` | 생성 후 내용 확인 / 직전 세션에서 즉시 복구 |
-| `-m, --model`, `--spec-model`, `--fallback-model` | 기본 / 사양서 작성용 / 대체 모델 |
-| `-t, --max-turns`, `-r, --max-retries` | 호출당 최대 턴 / 섹션 누락 보정 재시도 횟수 |
+| `--spec-dir`, `-f, --plan` | 문서 저장 폴더(기본 `spec`) / 계획 체크리스트 파일(기본 `spec-plan.md`) |
+| `--append-plan` | 기존 계획 끝에 새 요구사항에 대한 문서 항목 추가 (기본은 새 계획 생성) |
+| `--plan-only`, `--confirm-plan`, `--plan-model` | 계획만 생성 후 종료 / 확인 후 진행 / 계획 수립용 모델 |
+| `--recover-plan` | 직전 세션에서 계획 파일 복구 후 이어서 진행 |
+| `-s, --max-steps`, `-r, --max-retries` | 1회 실행당 최대 문서 수(기본 20) / 문서별 재시도 횟수 |
+| `--no-cross-check`, `--no-optimize` | 문서간 충돌 검증 / 최종 중복·충돌 검사+최적화 단계 생략 |
+| `-m, --model`, `--fallback-model`, `-t, --max-turns` | 문서 생성/검증용 모델, 대체 모델, 호출당 최대 턴 |
 | `-p, --perm`, `-b, --max-budget`, `-g, --auto-commit` | `run_plan.bash`와 동일 |
 | `--on-conflict ask\|pause\|auto`, `--decisions` | 요구사항 모호성/충돌 처리 방식, 결정 기록 파일 |
 | Slack / 한도 대기 / Ubuntu 옵션 | `--slack-token`, `--slack-channel`, `--slack-webhook`, `-w/--limit-wait`, `--tmux`, `--check-env` 등 `run_plan.bash`와 동일 |
 
 전체 옵션은 `generate_spec.bash --help`에서 확인할 수 있습니다. Slack 연동 설정·문제 해결 방법은 위 [Slack 연동](#slack-연동) 절을 그대로 참고하세요(두 스크립트가 같은 환경변수를 씁니다).
 
-## 사양서 섹션 구조
+## spec-plan.md 형식
+
+`plan.md`와 같은 체크박스 규칙을 쓰되, 문서 단위를 가리킵니다. 각 `Step N`의 상세 섹션에는 저장할 **파일 경로**가 반드시 있어야 하며, 스크립트가 이 경로로 폴더를 만들고 문서 생성 결과를 검증합니다.
 
 ```markdown
-## 1. 개요
-## 2. 목표 및 범위
-## 3. 기능 요구사항      (FR-1, FR-2 … 형태)
-## 4. 비기능 요구사항
-## 5. 데이터 및 API 설계
-## 6. 예외 처리 및 엣지 케이스
-## 7. 수용 기준          (FR-N별 테스트 가능한 기준)
-## 8. 테스트 계획
-## 9. 가정 및 제약사항
-## 10. 미결 이슈
+- [ ] Step 1: 개요 및 범위
+- [ ] Step 2: 기능 요구사항
+
+### Step 1
+- 파일 경로: spec/01-overview.md
+- 목적: ...
+- 포함할 내용(개요): ...
+- 의존 문서: 없음
+- 문서별 검증 기준: ...
+
+### Step 2
+- 파일 경로: spec/02-functional-requirements.md
+- 의존 문서: Step 1
+...
 ```
 
 ## 종료 코드
 
 | 코드 | 의미 |
 |---|---|
-| 0 | 사양서 생성 완료 |
-| 1 | 오류 (요구사항 없음, 파일 생성/복구 실패 등) |
+| 0 | 문서 세트 생성(계획 → 문서별 생성/검증 → 충돌 검증 → 최적화) 완료 |
+| 1 | 오류 (요구사항 없음, 계획/문서 생성 실패, 재시도 소진 등) |
+| 2 | 최대 문서 수(`--max-steps`) 도달 — 같은 명령으로 재실행하면 이어서 생성 |
 | 3 | 사용량 한도 도달 (`--no-limit-wait`) |
 | 4 | 의사결정 대기로 일시 정지 |

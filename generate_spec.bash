@@ -1,29 +1,28 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # generate_spec.bash - 개략적인 요구사항을 받아 Claude Code CLI로
-#                       개발에 바로 사용 가능한 고도화된 요구사항 사양서를
+#                       개발에 바로 사용 가능한 사양서 "문서 세트"를
 #                       spec/ 폴더 아래에 자동 생성하는 Ubuntu/GNU 환경용 스크립트
 #
 # 설명:
-#   1. [사양서 초안 생성] 사용자 요구사항(문자열, 파일, 표준입력)을 전달받아 현재
-#      코드베이스를 분석하고, 개발팀이 바로 구현에 착수할 수 있는 수준의 상세
-#      요구사항 사양서를 정해진 섹션 구조에 맞춰 spec/ 폴더에 생성합니다.
-#   2. [자기 검토 및 보강(고도화)] 초안 생성 후 지정한 횟수만큼 Claude가 스스로
-#      사양서를 코드베이스/요구사항과 대조 검토하여 누락된 엣지 케이스, 수용 기준,
-#      모호한 표현을 보완하는 재작성 패스를 반복합니다.
-#   3. [요구사항 모호성/충돌 처리] 사양서를 작성하는 중 요구사항 자체가 모순되거나
-#      핵심 의사결정 없이는 진행할 수 없는 경우 [DECISION_REQUIRED] 마커와
-#      decisions.md 파일을 통해 run_plan.bash와 동일한 방식으로 처리합니다:
-#      - ask   : 터미널에서 사용자에게 선택지를 제시하고 답변을 받아 즉시 이어서 진행
-#      - pause : decisions.md에 질문과 선택지를 기록하고 안전하게 일시 정지 (종료 코드 4)
-#      - auto  : 보수적 기준에 따라 자율 결정 후 decisions.md에 근거(ADR) 기록
-#   4. [토큰 한도 자동 대기 및 재개] 실행 중 사용량 한도(Usage Limit / 429 Rate Limit)에
-#      도달하면 해제 시각을 자동 계산(Python3 + Ubuntu GNU date 이중 파서)하여 대기한 뒤
-#      중단된 지점부터 '--continue'로 이어서 진행합니다.
-#   5. [파일 생성 검증 및 자동 복구] Claude가 텍스트로만 사양서를 출력하고 실제
-#      디스크에 저장하지 않았거나 다른 경로에 저장한 경우 이를 자동 탐색·복구합니다.
-#   6. [Slack 연동] run_plan.bash와 동일하게 의사결정 필요 시 Slack 알림 전송 및
-#      스레드 답글로 답변을 받아 재개할 수 있습니다.
+#   1. [문서 계획 수립] 요구사항을 분석해 필요한 문서 목록(개요/기능요구사항/
+#      데이터·API 설계/비기능요구사항/테스트 계획 등, 프로젝트 규모에 맞게 가변적)과
+#      저장할 폴더 구조를 정하고, 그 계획을 'spec-plan.md' 체크리스트로 저장합니다.
+#   2. [문서별 생성 및 검증] spec-plan.md의 미완료 항목(문서)을 하나씩 Claude에게
+#      맡겨 실제 파일로 작성시키고, 같은 호출 안에서 해당 문서 자체를 자기 검증·보완한
+#      뒤 체크박스를 완료로 표시합니다. 모든 문서가 완료될 때까지 반복합니다.
+#   3. [문서간 충돌 검증] 모든 문서가 완성되면 spec/ 전체를 다시 읽혀 문서 간
+#      모순(동일 항목에 대한 서로 다른 설명, 용어/ID 불일치, 끊어진 참조 등)을 찾아
+#      직접 수정하게 합니다.
+#   4. [최종 중복/충돌 검사 및 최적화] 마지막으로 전체 문서 세트를 다시 검토해 중복
+#      내용을 정리하고 남은 충돌을 해소하며, 문서 목록을 안내하는 인덱스를 만듭니다.
+#   5. [요구사항 모호성/충돌 처리] 위 모든 단계에서 사람의 결정이 꼭 필요한 경우
+#      run_plan.bash와 동일한 [DECISION_REQUIRED] + decisions.md + Slack 흐름으로
+#      처리합니다 (ask/pause/auto).
+#   6. [토큰 한도 자동 대기 및 재개] 사용량 한도(Usage Limit)에 도달하면 해제 시각을
+#      계산해 대기한 뒤 '--continue'로 이어서 진행합니다.
+#   7. [파일 생성 검증 및 자동 복구] Claude가 파일을 저장하지 않고 텍스트로만
+#      출력한 경우 자동 탐색·복구합니다.
 #
 # 참고 문서:
 #   - Claude Code CLI Reference: https://code.claude.com/docs/en/cli-reference
@@ -37,49 +36,50 @@ set -euo pipefail
 trap '' HUP
 
 # 기본 설정값 (환경변수로도 오버라이드 가능)
-SPEC_DIR="${SPEC_DIR:-spec}"
-SPEC_FILE="${SPEC_FILE:-}"             # 전체 경로 직접 지정 시 --spec-dir/--name 무시
-SPEC_NAME="${SPEC_NAME:-}"             # 파일명(확장자 제외). 미지정 시 타임스탬프 사용
+SPEC_DIR="${SPEC_DIR:-spec}"                       # 생성된 문서들이 저장될 폴더
+SPEC_PLAN_FILE="${SPEC_PLAN_FILE:-spec-plan.md}"   # 문서 목록/계획 체크리스트 파일
 DECISIONS_FILE="${DECISIONS_FILE:-decisions.md}"
 REQUIREMENTS="${REQUIREMENTS:-}"
 REQ_FILE="${REQ_FILE:-}"
-SPEC_MODE_ACTION="${SPEC_MODE_ACTION:-overwrite}" # overwrite | append
-SPEC_ONLY_DRAFT="${SPEC_ONLY_DRAFT:-false}"       # true면 보강 패스 없이 초안만 생성
-CONFIRM_SPEC="${CONFIRM_SPEC:-false}"
-RECOVER_LAST_SPEC="${RECOVER_LAST_SPEC:-false}"
+PLAN_MODE_ACTION="${PLAN_MODE_ACTION:-overwrite}" # overwrite | append
+PLAN_ONLY="${PLAN_ONLY:-false}"
+CONFIRM_PLAN="${CONFIRM_PLAN:-false}"
+RECOVER_LAST_PLAN="${RECOVER_LAST_PLAN:-false}"
 ON_CONFLICT="${ON_CONFLICT:-ask}"                 # ask | pause | auto
-REFINE_PASSES="${REFINE_PASSES:-1}"
+MAX_STEPS="${MAX_STEPS:-20}"                      # 한 번 실행에서 생성할 최대 문서 수
 MAX_TURNS="${MAX_TURNS:-30}"
 MAX_RETRIES="${MAX_RETRIES:-2}"
 PERMISSION_STRATEGY="${PERMISSION_STRATEGY:-bypass}" # bypass | auto | acceptEdits | allowed
 ALLOWED_TOOLS="${ALLOWED_TOOLS:-Bash,Read,Edit,Write}"
 MODEL="${MODEL:-}"
-SPEC_MODEL="${SPEC_MODEL:-}"
+PLAN_MODEL="${PLAN_MODEL:-}"
 FALLBACK_MODEL="${FALLBACK_MODEL:-}"
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"
 AUTO_COMMIT="${AUTO_COMMIT:-false}"
+SKIP_CROSS_CHECK="${SKIP_CROSS_CHECK:-false}"     # true면 문서간 충돌 검증(Stage C) 생략
+SKIP_OPTIMIZE="${SKIP_OPTIMIZE:-false}"           # true면 최종 중복/충돌 검사·최적화(Stage D) 생략
 LOG_DIR="${LOG_DIR:-.claude-spec-logs}"
 DRY_RUN="false"
 
 # Slack 연동 설정 (의사결정 필요 시 알림 + 스레드 답글로 답변 수신) - run_plan.bash와 동일
-SLACK_BOT_TOKEN="${SLACK_BOT_TOKEN:-}"                 # xoxb-... (scopes: chat:write, channels:history 또는 groups:history)
-SLACK_CHANNEL="${SLACK_CHANNEL:-}"                     # 채널 ID (예: C0123456789). 봇이 채널에 초대되어 있어야 함
-SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"             # 알림 전용(답변 수신 불가). 토큰/채널 미설정 시 사용
-SLACK_POLL_INTERVAL="${SLACK_POLL_INTERVAL:-10}"       # 답글 확인 주기(초)
-SLACK_REPLY_TIMEOUT="${SLACK_REPLY_TIMEOUT:-0}"        # 답변 대기 제한(분). 0 = 무제한, 초과 시 pause(종료 코드 4)
+SLACK_BOT_TOKEN="${SLACK_BOT_TOKEN:-}"
+SLACK_CHANNEL="${SLACK_CHANNEL:-}"
+SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
+SLACK_POLL_INTERVAL="${SLACK_POLL_INTERVAL:-10}"
+SLACK_REPLY_TIMEOUT="${SLACK_REPLY_TIMEOUT:-0}"
 
 # 토큰/사용량 한도(Usage Limit) 대기 관련 설정
 WAIT_ON_LIMIT="${WAIT_ON_LIMIT:-true}"
-LIMIT_FALLBACK_MINUTES="${LIMIT_FALLBACK_MINUTES:-15}" # 해제 시각 파싱 불가 시 기본 대기(분)
-LIMIT_BUFFER_SECONDS="${LIMIT_BUFFER_SECONDS:-60}"     # 해제 시각 이후 안전 여유 시간(초)
-MAX_LIMIT_WAITS="${MAX_LIMIT_WAITS:-24}"               # 호출당 최대 한도 대기 횟수
-RESUME_ON_LIMIT_WAKE="${RESUME_ON_LIMIT_WAKE:-true}"   # 한도 해제 후 재개 시 --continue 활용 여부
+LIMIT_FALLBACK_MINUTES="${LIMIT_FALLBACK_MINUTES:-15}"
+LIMIT_BUFFER_SECONDS="${LIMIT_BUFFER_SECONDS:-60}"
+MAX_LIMIT_WAITS="${MAX_LIMIT_WAITS:-24}"
+RESUME_ON_LIMIT_WAKE="${RESUME_ON_LIMIT_WAKE:-true}"
 
 # Ubuntu 전용 설정
 USE_TMUX="${USE_TMUX:-false}"
 TMUX_SESSION_NAME="${TMUX_SESSION_NAME:-claude-spec}"
-INHIBIT_SLEEP="${INHIBIT_SLEEP:-true}"                 # systemd-inhibit 절전 방지 사용 여부
-ENABLE_NOTIFY="${ENABLE_NOTIFY:-true}"                 # Ubuntu notify-send 데스크톱 알림 여부
+INHIBIT_SLEEP="${INHIBIT_SLEEP:-true}"
+ENABLE_NOTIFY="${ENABLE_NOTIFY:-true}"
 CHECK_ENV_ONLY="false"
 
 # 색상 출력 설정
@@ -92,25 +92,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 ORIGINAL_ARGS=("$@")
-
-# 기준 경로(Base Path): 스크립트를 호출한 현재 디렉터리(프로젝트 폴더).
-# 스크립트 자체는 PATH 어디에 있어도 되며, spec/ · decisions.md · 로그 · claude 작업 디렉터리는
-# 모두 호출 위치 기준이다. (SCRIPT_PATH는 --tmux 재실행용 스크립트 실제 경로)
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
-
-# 사양서에 반드시 포함되어야 하는 섹션 제목 (프롬프트 템플릿과 동일하게 유지해야 함)
-REQUIRED_SECTIONS=(
-  "1. 개요"
-  "2. 목표 및 범위"
-  "3. 기능 요구사항"
-  "4. 비기능 요구사항"
-  "5. 데이터 및 API 설계"
-  "6. 예외 처리 및 엣지 케이스"
-  "7. 수용 기준"
-  "8. 테스트 계획"
-  "9. 가정 및 제약사항"
-  "10. 미결 이슈"
-)
 
 usage() {
   cat <<EOF
@@ -121,44 +103,42 @@ usage() {
   -q, --req <요구사항>          구현할 개략적인 요구사항 텍스트 (위치 인자로도 전달 가능)
   -i, --req-file <파일경로>     요구사항이 적힌 메모/문서 파일 경로
 
-사양서 생성 옵션:
-  -d, --spec-dir <폴더경로>     사양서를 저장할 폴더 (기본값: ${SPEC_DIR})
-  -n, --name <슬러그>           사양서 파일명(확장자 제외). 미지정 시 타임스탬프로 자동 생성
-      --spec-file <파일경로>    사양서 전체 경로 직접 지정 (--spec-dir/--name 무시)
-      --append                  기존 사양서 파일 끝에 새 요구사항에 대한 섹션 추가 (기본: 새 파일 생성)
-      --spec-model <모델명>     사양서 작성 단계에 사용할 모델 지정 (예: opus)
-      --refine-passes <숫자>    초안 작성 후 자기 검토·보강(고도화) 반복 횟수 (기본값: 1, 0=생략)
-      --confirm-spec            사양서 생성 후 내용을 출력하고 사용자 확인(Y/n)
-      --recover-spec            직전 세션(--continue)에서 작성된 사양서를 즉시 복구 후 종료
+문서 계획 수립 옵션:
+      --spec-dir <폴더경로>     생성된 문서들을 저장할 폴더 (기본값: ${SPEC_DIR})
+  -f, --plan <파일경로>         문서 목록/계획 체크리스트 파일 경로 (기본값: ${SPEC_PLAN_FILE})
+      --append-plan             기존 ${SPEC_PLAN_FILE} 끝에 새 요구사항에 대한 문서 항목들을 추가
+      --plan-only               문서 계획(${SPEC_PLAN_FILE})과 폴더 구조만 만들고 종료
+      --confirm-plan             ${SPEC_PLAN_FILE} 생성 후 내용을 출력하고 사용자 확인(Y/n) 후 진행
+      --plan-model <모델명>     문서 계획 수립 단계에 사용할 모델 지정 (예: opus)
+      --recover-plan            직전 세션(--continue)에서 작성된 계획을 복구 후 이어서 진행
 
-스펙 모호성/충돌 및 의사결정(Decision) 제어 옵션:
+의사결정(Decision) 제어 옵션:
       --on-conflict <모드>      요구사항이 모순되거나 핵심 결정이 필요할 때 처리 방식 (기본값: ask)
                                   - ask   : 터미널에서 선택지를 보여주고 사용자 입력을 받아 즉시 재개
-                                            (비대화형 백그라운드 실행 시에는 자동으로 pause로 동작)
                                   - pause : ${DECISIONS_FILE}에 내용과 선택지를 기록하고 일시 정지
-                                  - auto  : 보수적 기준으로 자율 결정 후 ${DECISIONS_FILE}에
-                                            결정 근거(ADR)를 남기고 계속 진행
-      --decisions <파일경로>    의사결정 기록 및 지침 파일 경로 (기본값: ${DECISIONS_FILE})
+                                  - auto  : 보수적 기준으로 자율 결정 후 ${DECISIONS_FILE}에 기록 후 진행
+      --decisions <파일경로>    의사결정 기록 파일 경로 (기본값: ${DECISIONS_FILE})
+
+문서 생성 및 검증 단계 제어:
+  -s, --max-steps <숫자>        1회 실행당 생성할 최대 문서 수 (기본값: ${MAX_STEPS})
+  -t, --max-turns <숫자>        호출당 최대 에이전트 턴 수 (기본값: ${MAX_TURNS})
+  -r, --max-retries <숫자>      문서 생성/검증 실패 시 최대 재시도 횟수 (기본값: ${MAX_RETRIES})
+      --no-cross-check          모든 문서 생성 후 "문서간 충돌 검증" 단계를 건너뜀
+      --no-optimize             마지막 "중복/충돌 검사 및 최적화" 단계를 건너뜀
 
 실행 제어 옵션:
-  -t, --max-turns <숫자>        호출당 최대 에이전트 턴 수 (--max-turns, 기본값: ${MAX_TURNS})
-  -r, --max-retries <숫자>      섹션 누락 보강 재시도 최대 횟수 (기본값: ${MAX_RETRIES})
-  -p, --perm <모드>             권한 승인 방식 선택 (기본값: ${PERMISSION_STRATEGY})
-                                  - bypass      : --dangerously-skip-permissions 사용
-                                  - auto        : --permission-mode auto 사용
-                                  - acceptEdits : --permission-mode acceptEdits 사용
-                                  - allowed     : --allowedTools "${ALLOWED_TOOLS}" 사용
-  -m, --model <모델명>          Claude 모델 지정 (예: sonnet, opus). --spec-model 미지정 시 이 값을 사용
-      --fallback-model <모델들> 기본 모델 과부하 시 대체할 모델 목록 (예: sonnet,haiku)
-  -b, --max-budget <USD>        호출당 최대 API 비용 한도 (--max-budget-usd, 예: 5.00)
-  -g, --auto-commit             사양서 생성 완료 후 자동으로 Git 커밋 생성
+  -p, --perm <모드>             권한 승인 방식 (기본값: ${PERMISSION_STRATEGY})
+                                  bypass | auto | acceptEdits | allowed
+  -m, --model <모델명>          문서 생성/검증 단계에 사용할 모델
+      --fallback-model <모델들> 기본 모델 과부하 시 대체할 모델 목록
+  -b, --max-budget <USD>        호출당 최대 API 비용 한도
+  -g, --auto-commit             문서별 생성 및 최종 단계 완료 후 자동으로 Git 커밋
 
-Slack 연동 옵션 (의사결정 필요 시 Slack 알림 → 스레드 답글로 답변 수신 → 즉시 재개):
-      --slack-token <토큰>      Slack Bot Token (환경변수 SLACK_BOT_TOKEN, xoxb-...)
-      --slack-channel <채널ID>  알림/답변 채널 ID (환경변수 SLACK_CHANNEL, 봇 초대 필요)
-      --slack-webhook <URL>     알림 전용 Incoming Webhook (답변 수신 불가 → 알림 후 pause)
-      --slack-timeout <분>      Slack 답변 대기 제한 (기본값: 0=무제한, 초과 시 pause)
-                                  답글 형식: 1/Enter 상당(ok) = 선택지 1, 2 = 선택지 2, q = 일시정지, 그 외 = 직접 지침
+Slack 연동 옵션:
+      --slack-token <토큰>      Slack Bot Token (환경변수 SLACK_BOT_TOKEN)
+      --slack-channel <채널ID>  알림/답변 채널 ID (환경변수 SLACK_CHANNEL)
+      --slack-webhook <URL>     알림 전용 Incoming Webhook
+      --slack-timeout <분>      Slack 답변 대기 제한 (기본값: 0=무제한)
 
 토큰/사용량 한도(Usage Limit) 대기 옵션:
   -w, --limit-wait <분>         해제 시각 미표시 시 기본 재시도 대기 시간(분) (기본값: 15)
@@ -166,37 +146,38 @@ Slack 연동 옵션 (의사결정 필요 시 Slack 알림 → 스레드 답글�
       --no-limit-wait           토큰 한도 도달 시 대기하지 않고 즉시 종료
 
 Ubuntu 환경 전용 옵션:
-      --tmux [세션명]           Ubuntu tmux 백그라운드 세션에서 스크립트를 시작 (기본 세션명: ${TMUX_SESSION_NAME})
+      --tmux [세션명]           tmux 백그라운드 세션에서 시작 (기본 세션명: ${TMUX_SESSION_NAME})
       --no-inhibit              systemd-inhibit 절전 방지 기능 비활성화
-      --check-env               Ubuntu 패키지, 타임존, Claude CLI 설치 상태 진단 후 종료
+      --check-env               환경 진단 후 종료
 
 기타 옵션:
-      --dry-run                 실제 실행 없이 호출될 명령어와 프롬프트만 확인
+      --dry-run                 실제 실행 없이 계획 수립 호출 명령어/프롬프트만 확인
   -h, --help                    도움말 출력
 
-Ubuntu 실행 예시:
-  # 1) 요구사항 텍스트로 사양서 생성 (spec/spec_<타임스탬프>.md)
+실행 예시:
+  # 1) 요구사항으로 문서 세트 생성 (계획 -> 문서별 생성/검증 -> 충돌검증 -> 최적화)
   ./$(basename "$0") "모바일 앱에 푸시 알림 기능 추가"
 
-  # 2) 메모 파일을 바탕으로 이름을 지정해 생성하고, 보강 2회 수행
-  ./$(basename "$0") --req-file memo.md --name push-notification --refine-passes 2
+  # 2) 계획만 만들고 검토 후 생성 시작
+  ./$(basename "$0") --req-file memo.md --plan-only
+  ./$(basename "$0")                      # 기존 ${SPEC_PLAN_FILE}의 미완료 문서부터 이어서 생성
 
-  # 3) 생성 후 내용 확인하고 git 커밋까지
-  ./$(basename "$0") --req-file memo.md --confirm-spec --auto-commit
+  # 3) 계획 확인 후 진행, 완료 시 자동 커밋
+  ./$(basename "$0") --req-file memo.md --confirm-plan --auto-commit
 
   # 4) 완전 무인 실행: 모호성 발생 시 보수적 기준으로 자율 결정
   ./$(basename "$0") --tmux --on-conflict auto --req-file memo.md
 
-  # 5) 생성된 사양서를 run_plan.bash로 바로 구현 시작
-  run_plan.bash --req-file ${SPEC_DIR}/push-notification.md
+  # 5) 생성된 문서 중 하나를 바탕으로 run_plan.bash로 구현 시작
+  run_plan.bash --req-file ${SPEC_DIR}/02-functional-requirements.md
 EOF
 }
 
-# Ubuntu 데스크톱 알림 전송 함수 (GUI 환경 및 notify-send 존재 시 동작)
+# Ubuntu 데스크톱 알림 전송 함수
 send_ubuntu_notification() {
   local title="$1"
   local message="$2"
-  local urgency="${3:-normal}" # low | normal | critical
+  local urgency="${3:-normal}"
 
   if [[ "$ENABLE_NOTIFY" == "true" ]] && command -v notify-send >/dev/null 2>&1; then
     if [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
@@ -263,36 +244,32 @@ while [[ $# -gt 0 ]]; do
       REQ_FILE="$2"
       shift 2
       ;;
-    -d|--spec-dir)
+    --spec-dir)
       SPEC_DIR="$2"
       shift 2
       ;;
-    -n|--name)
-      SPEC_NAME="$2"
+    -f|--plan)
+      SPEC_PLAN_FILE="$2"
       shift 2
       ;;
-    --spec-file)
-      SPEC_FILE="$2"
-      shift 2
-      ;;
-    --append)
-      SPEC_MODE_ACTION="append"
+    --append-plan)
+      PLAN_MODE_ACTION="append"
       shift
       ;;
-    --spec-model)
-      SPEC_MODEL="$2"
-      shift 2
-      ;;
-    --refine-passes)
-      REFINE_PASSES="$2"
-      shift 2
-      ;;
-    --confirm-spec)
-      CONFIRM_SPEC="true"
+    --plan-only)
+      PLAN_ONLY="true"
       shift
       ;;
-    --recover-spec)
-      RECOVER_LAST_SPEC="true"
+    --confirm-plan)
+      CONFIRM_PLAN="true"
+      shift
+      ;;
+    --plan-model)
+      PLAN_MODEL="$2"
+      shift 2
+      ;;
+    --recover-plan)
+      RECOVER_LAST_PLAN="true"
       shift
       ;;
     --on-conflict)
@@ -303,6 +280,10 @@ while [[ $# -gt 0 ]]; do
       DECISIONS_FILE="$2"
       shift 2
       ;;
+    -s|--max-steps)
+      MAX_STEPS="$2"
+      shift 2
+      ;;
     -t|--max-turns)
       MAX_TURNS="$2"
       shift 2
@@ -310,6 +291,14 @@ while [[ $# -gt 0 ]]; do
     -r|--max-retries)
       MAX_RETRIES="$2"
       shift 2
+      ;;
+    --no-cross-check)
+      SKIP_CROSS_CHECK="true"
+      shift
+      ;;
+    --no-optimize)
+      SKIP_OPTIMIZE="true"
+      shift
       ;;
     -p|--perm)
       PERMISSION_STRATEGY="$2"
@@ -404,8 +393,8 @@ case "$ON_CONFLICT" in
     ;;
 esac
 
-if ! [[ "$REFINE_PASSES" =~ ^[0-9]+$ ]]; then
-  echo -e "${RED}[오류] --refine-passes 값은 0 이상의 정수여야 합니다 (입력값: ${REFINE_PASSES}).${NC}" >&2
+if ! [[ "$MAX_STEPS" =~ ^[0-9]+$ ]]; then
+  echo -e "${RED}[오류] --max-steps 값은 0 이상의 정수여야 합니다 (입력값: ${MAX_STEPS}).${NC}" >&2
   exit 1
 fi
 
@@ -418,9 +407,11 @@ fi
 WORK_DIR="$(pwd)"
 if command -v realpath >/dev/null 2>&1; then
   ABS_SPEC_DIR="$(realpath -m "$SPEC_DIR")"
+  ABS_SPEC_PLAN_FILE="$(realpath -m "$SPEC_PLAN_FILE")"
   ABS_DECISIONS_FILE="$(realpath -m "$DECISIONS_FILE")"
 else
   [[ "$SPEC_DIR" = /* ]] && ABS_SPEC_DIR="$SPEC_DIR" || ABS_SPEC_DIR="${WORK_DIR}/${SPEC_DIR}"
+  [[ "$SPEC_PLAN_FILE" = /* ]] && ABS_SPEC_PLAN_FILE="$SPEC_PLAN_FILE" || ABS_SPEC_PLAN_FILE="${WORK_DIR}/${SPEC_PLAN_FILE}"
   [[ "$DECISIONS_FILE" = /* ]] && ABS_DECISIONS_FILE="$DECISIONS_FILE" || ABS_DECISIONS_FILE="${WORK_DIR}/${DECISIONS_FILE}"
 fi
 
@@ -457,7 +448,6 @@ if [[ "$USE_TMUX" == "true" && -z "${TMUX:-}" && "$DRY_RUN" != "true" ]]; then
     exit 1
   fi
 
-  # 재실행 시에도 프로젝트 폴더(호출 위치)에서 시작해야 상대경로가 동일하게 해석된다
   tmux new-session -d -c "$WORK_DIR" -s "$TMUX_SESSION_NAME" "bash -c ${TMUX_CMD}; exec bash"
   echo -e "${GREEN}[Ubuntu tmux 시작] 백그라운드 tmux 세션('${TMUX_SESSION_NAME}')에서 작업을 시작했습니다.${NC}"
   echo -e " - 실시간 화면 접속 : ${CYAN}tmux attach -t ${TMUX_SESSION_NAME}${NC}"
@@ -484,8 +474,8 @@ if [[ -n "$REQ_FILE" ]]; then
   fi
 fi
 
-# 파이프(stdin)로 전달된 요구사항 읽기 지원 (예: cat memo.md | ./generate_spec.bash)
-if [[ -z "$REQUIREMENTS" && "$RECOVER_LAST_SPEC" != "true" && ! -t 0 ]]; then
+# 파이프(stdin)로 전달된 요구사항 읽기 지원
+if [[ -z "$REQUIREMENTS" && "$RECOVER_LAST_PLAN" != "true" && ! -t 0 ]]; then
   STDIN_CONTENT=$(cat)
   if [[ -n "$STDIN_CONTENT" ]]; then
     REQUIREMENTS="$STDIN_CONTENT"
@@ -533,30 +523,6 @@ ubuntu_safe_sleep() {
     sleep "$seconds"
   fi
 }
-
-# --spec-file / --spec-dir / --name 조합으로 사양서 저장 경로(ABS_SPEC_FILE) 확정
-resolve_spec_file() {
-  if [[ -n "$SPEC_FILE" ]]; then
-    if command -v realpath >/dev/null 2>&1; then
-      ABS_SPEC_FILE="$(realpath -m "$SPEC_FILE")"
-    else
-      [[ "$SPEC_FILE" = /* ]] && ABS_SPEC_FILE="$SPEC_FILE" || ABS_SPEC_FILE="${WORK_DIR}/${SPEC_FILE}"
-    fi
-    SPEC_FILE_REL="${ABS_SPEC_FILE#"${WORK_DIR}"/}"
-    return 0
-  fi
-
-  local slug="$SPEC_NAME"
-  if [[ -z "$slug" ]]; then
-    slug="spec_$(date +"%Y%m%d_%H%M%S")"
-  fi
-  slug="${slug%.md}"
-
-  ABS_SPEC_FILE="${ABS_SPEC_DIR}/${slug}.md"
-  SPEC_FILE_REL="${ABS_SPEC_FILE#"${WORK_DIR}"/}"
-}
-
-resolve_spec_file
 
 # Claude CLI 공통 실행 인자 구성 함수
 # $1: 사용할 모델명 (비어있으면 기본값), $2: 세션 이어하기 여부 ("true" | "false")
@@ -607,7 +573,9 @@ build_claude_args() {
 # ==============================================================================
 
 # 현재 설정된 --on-conflict 모드에 따라 프롬프트에 주입할 지침 생성
+# $1: 사람이 읽을 "현재 작업 대상"에 대한 설명 (따옴표 포함해서 전달, 예: "'${ABS_SPEC_PLAN_FILE}'")
 get_conflict_policy_instruction() {
+  local target_desc="$1"
   local decisions_context=""
   if [[ -f "$ABS_DECISIONS_FILE" ]]; then
     decisions_context="참고: 프로젝트에 이미 기록된 '${ABS_DECISIONS_FILE}' 파일이 존재하므로, 먼저 해당 파일의 기존 의사결정 내역을 확인하고 일관되게 준수해."
@@ -617,26 +585,26 @@ get_conflict_policy_instruction() {
     cat <<EOF
 [요구사항 모호성/의사결정 지침 (--on-conflict auto)]
 ${decisions_context}
-- 사양서 작성 중 요구사항이 서로 모순되거나, 핵심 비즈니스/설계 결정(예: 인증 방식, 과금 정책, 데이터 보존 기간) 없이는 다음 섹션을 채울 수 없는 상황이 발생하면 멈추지 말고 다음 우선순위에 따라 자율적으로 결정해:
+- 작업 중 요구사항이 서로 모순되거나, 핵심 비즈니스/설계 결정(예: 인증 방식, 과금 정책, 데이터 보존 기간) 없이는 진행할 수 없는 상황이 발생하면 멈추지 말고 다음 우선순위에 따라 자율적으로 결정해:
   1순위: 사용자가 전달한 요구사항 원문 및 '${ABS_DECISIONS_FILE}'의 기존 결정 사항
   2순위: 기존 코드베이스의 아키텍처 컨벤션 및 하위 호환성(Backward Compatibility) 유지
   3순위: 부작용이 가장 적은 보수적이고 표준적인 설계 방식 선택
-- 자율 결정을 내린 경우 '${ABS_DECISIONS_FILE}' 파일에 (없으면 생성하여) [날짜, 이슈, 선택한 방안 및 근거]를 ADR(Architecture Decision Record) 형식으로 기록하고, 해당 결정을 반영해 사양서 작성을 끝까지 완료해.
+- 자율 결정을 내린 경우 '${ABS_DECISIONS_FILE}' 파일에 (없으면 생성하여) [날짜, 이슈, 선택한 방안 및 근거]를 ADR(Architecture Decision Record) 형식으로 기록하고, 해당 결정을 반영해 작업을 끝까지 완료해.
 EOF
   else
     cat <<EOF
 [요구사항 모호성/의사결정 지침 (--on-conflict ${ON_CONFLICT})]
 ${decisions_context}
-- 사소한 세부사항, 모호하지만 합리적인 기본값이 있는 사항, 기존 코드 컨벤션으로 정해지는 사항은 묻지 말고 스스로 판단해 사양서에 반영해. 이런 판단은 '${ABS_DECISIONS_FILE}'에 한 줄만 남겨.
-- 결정 요청은 최후의 수단이야. 아래 경우에만 해당해: 요구사항(Spec) 자체가 서로 모순되어 둘을 동시에 만족할 수 없거나, 기존 핵심 동작/정책을 깨뜨리는 파괴적 변경이 불가피하거나, 사용자의 비즈니스 의사결정 없이는 어느 쪽으로도 사양서를 채울 수 없는 경우. 이때는 임의로 추측해서 사양서를 작성하지 마.
-- 위 경우에 해당하지 않으면(모호성/충돌이 없으면) 아래 결정 요청 블록과 그 마커 문자열을 절대 출력하거나 언급하지 말고, 그냥 사양서 작성을 끝까지 진행해.
-- 중요: 결정이 필요한 사항이 있더라도, 먼저 '${ABS_SPEC_FILE}' 파일 자체는 반드시 Write 도구로 디스크에 실제로 생성해 두고(미결정 사항은 해당 섹션에 '(결정 필요)'로 표시), 그 다음에 질문을 출력해야 해! 파일을 생성하지 않고 텍스트로만 출력하면 안 돼.
+- 사소한 세부사항, 모호하지만 합리적인 기본값이 있는 사항, 기존 컨벤션으로 정해지는 사항은 묻지 말고 스스로 판단해 반영해. 이런 판단은 '${ABS_DECISIONS_FILE}'에 한 줄만 남겨.
+- 결정 요청은 최후의 수단이야. 아래 경우에만 해당해: 요구사항 자체가 서로 모순되어 둘을 동시에 만족할 수 없거나, 기존 핵심 동작/정책을 깨뜨리는 파괴적 변경이 불가피하거나, 사용자의 비즈니스 의사결정 없이는 어느 쪽으로도 진행할 수 없는 경우. 이때는 임의로 추측해서 작성하지 마.
+- 위 경우에 해당하지 않으면(모호성/충돌이 없으면) 아래 결정 요청 블록과 그 마커 문자열을 절대 출력하거나 언급하지 말고, 그냥 작업을 끝까지 진행해.
+- 중요: 결정이 필요한 사항이 있더라도, 먼저 작업 대상(${target_desc})은 반드시 Write 또는 Edit 도구로 디스크에 실제로 반영해 두고(미결정 사항은 해당 부분에 '(결정 필요)'로 표시), 그 다음에 질문을 출력해야 해! 디스크에 반영하지 않고 텍스트로만 출력하면 안 돼.
 - 중대한 모호성/충돌이 있는 경우:
-  1. '${ABS_SPEC_FILE}' 파일이 디스크에 저장되어 있는지 확인해.
+  1. 작업 대상(${target_desc})이 디스크에 저장되어 있는지 확인해.
   2. '${ABS_DECISIONS_FILE}' 파일에 충돌 원인과 선택지(권장안 포함)를 상세히 기록해.
   3. 출력 마지막에 반드시 아래 형식의 블록을 정확히 출력하고 턴을 종료해:
 [DECISION_REQUIRED]
-- 단계: (사양서의 어느 섹션/항목인지)
+- 단계: (무엇을 작업하던 중이었는지)
 - 충돌/이슈 요약: (무엇이 모순되거나 모호한지 설명)
 - 선택지 1 (권장): (방안 설명 및 장단점)
 - 선택지 2: (대안 설명 및 장단점)
@@ -645,12 +613,7 @@ EOF
   fi
 }
 
-# 로그 파일에서 [DECISION_REQUIRED] 블록이 출력되었는지 감지
-#
-# 오탐 방지: 마커를 문장 중간에서 언급만 한 경우는 무시한다. 다음 조건을 모두 만족하는
-# '완결된 블록'이 있을 때만 결정 필요로 판단한다.
-#   - 여는 마커와 닫는 마커가 각각 한 줄을 단독으로 차지 (앞뒤 공백/마크다운 장식 허용)
-#   - 블록 안에 '- 선택지 N' 줄이 하나 이상 존재
+# 로그 파일에서 [DECISION_REQUIRED] 블록이 출력되었는지 감지 (완결된 블록만 인정)
 is_decision_required() {
   local log_file="$1"
   if [[ ! -f "$log_file" ]]; then
@@ -659,7 +622,7 @@ is_decision_required() {
   [[ -n "$(extract_decision_block "$log_file")" ]]
 }
 
-# 로그 파일에서 마지막 완결된 [DECISION_REQUIRED] ... [/DECISION_REQUIRED] 블록 추출 (없으면 빈 출력)
+# 로그 파일에서 마지막 완결된 [DECISION_REQUIRED] ... [/DECISION_REQUIRED] 블록 추출
 extract_decision_block() {
   local log_file="$1"
   awk '
@@ -677,13 +640,11 @@ extract_decision_block() {
 # Slack 연동: 알림 전송 및 스레드 답글 수신 (curl + python3 사용) - run_plan.bash와 동일
 # ------------------------------------------------------------------------------
 
-# 양방향(알림 + 답변 수신) 가능 여부: Bot Token + 채널 ID 필요
 slack_reply_enabled() {
   [[ -n "$SLACK_BOT_TOKEN" && -n "$SLACK_CHANNEL" ]] \
     && command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1
 }
 
-# 알림만 가능한지 여부 (Bot Token 또는 Webhook)
 slack_notify_enabled() {
   slack_reply_enabled && return 0
   [[ -n "$SLACK_WEBHOOK_URL" ]] && command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1
@@ -778,7 +739,6 @@ handle_decision_required() {
     "${step_label} 진행 중 요구사항 모호성/충돌이 발생했습니다. 확인이 필요합니다." \
     "critical"
 
-  # Slack 알림 전송 (실패해도 진행에는 영향 없음). 양방향 가능 시 스레드 ts 보관
   local slack_ts="" decision_source="터미널"
   if slack_notify_enabled; then
     local slack_msg
@@ -800,22 +760,19 @@ ${decision_block:-$(tail -n 25 "$log_file")}
     fi
   fi
 
-  # Slack 답변 대기 가능 여부 (Bot Token 방식, ts 확보, pause 모드 아님)
   local use_slack_reply="false"
   if [[ -n "$slack_ts" && "$slack_ts" != "webhook" && "$ON_CONFLICT" != "pause" ]] && slack_reply_enabled; then
     use_slack_reply="true"
   fi
 
-  # pause 모드이거나 비대화형 터미널(백그라운드/파이프)이면서 Slack 답변도 못 받는 경우 파일에 기록 후 안전 정지
   if [[ "$ON_CONFLICT" == "pause" || ( ! -t 0 && "$use_slack_reply" != "true" ) ]]; then
     echo -e "${RED}[일시 정지] '--on-conflict pause' (또는 비대화형 세션) 상태이므로 실행을 안전하게 일시 정지합니다.${NC}"
     echo -e "해결 방법:"
-    echo -e "  1) '${CYAN}${ABS_DECISIONS_FILE}${NC}' 또는 '${CYAN}${ABS_SPEC_FILE}${NC}'에 원하시는 결정 방향을 작성/수정하세요."
-    echo -e "  2) '${CYAN}./$(basename "$0") --recover-spec${NC}'를 실행하면 직전 세션을 이어받아 재개할 수 있습니다."
+    echo -e "  1) '${CYAN}${ABS_DECISIONS_FILE}${NC}' 또는 '${CYAN}${ABS_SPEC_PLAN_FILE}${NC}'에 원하시는 결정 방향을 작성/수정하세요."
+    echo -e "  2) 같은 명령으로 '${CYAN}./$(basename "$0")${NC}'를 다시 실행하면(필요하면 '${CYAN}--recover-plan${NC}') 이어서 진행됩니다."
     exit 4
   fi
 
-  # ask 모드: 터미널 입력(대화형일 때)과 Slack 스레드 답글(활성화 시) 중 먼저 도착한 답변 사용
   local user_input=""
   if [[ "$use_slack_reply" == "true" ]]; then
     echo -e "${CYAN}Slack 스레드 답글을 기다리는 중입니다 (${SLACK_POLL_INTERVAL}초 간격 확인$([[ "$SLACK_REPLY_TIMEOUT" -gt 0 ]] && echo ", 제한 ${SLACK_REPLY_TIMEOUT}분")).${NC}"
@@ -834,7 +791,6 @@ ${decision_block:-$(tail -n 25 "$log_file")}
     [[ -t 0 ]] && printf "결정 입력 > "
     while true; do
       if [[ -t 0 ]]; then
-        # 타임아웃 시 bash가 부분 입력을 변수에 남기므로 누적하여 입력 유실 방지
         part=""
         rc=0
         IFS= read -r -t "$SLACK_POLL_INTERVAL" part || rc=$?
@@ -870,7 +826,7 @@ ${decision_block:-$(tail -n 25 "$log_file")}
   fi
 
   if [[ "$user_input" == "q" || "$user_input" == "quit" ]]; then
-    echo -e "${YELLOW}[일시 정지] 사용자 요청으로 스크립트를 중단합니다. '${DECISIONS_FILE}' 수정 후 '--recover-spec'으로 재실행하세요.${NC}"
+    echo -e "${YELLOW}[일시 정지] 사용자 요청으로 스크립트를 중단합니다. '${DECISIONS_FILE}' 수정 후 다시 실행하면 이어서 진행됩니다.${NC}"
     [[ "$use_slack_reply" == "true" ]] && { slack_post ":pause_button: 요청에 따라 실행을 일시 정지했습니다." "$slack_ts" >/dev/null 2>&1 || true; }
     exit 4
   fi
@@ -885,7 +841,6 @@ ${decision_block:-$(tail -n 25 "$log_file")}
     USER_DECISION_INPUT="$user_input"
   fi
 
-  # 사용자의 결정을 decisions.md에 영구 기록하여 이후 작성에서도 참조되게 함
   {
     echo ""
     echo "## [$(date +"%Y-%m-%d %H:%M:%S")] ${step_label} 의사결정 기록"
@@ -907,23 +862,19 @@ ${decision_block:-$(tail -n 25 "$log_file")}
 }
 
 # ==============================================================================
-# 토큰/사용량 한도(Usage Limit / Rate Limit) 감지 및 해제 시각까지 대기하는 함수들
-# (run_plan.bash와 완전히 동일한 파싱/대기 로직)
+# 토큰/사용량 한도(Usage Limit / Rate Limit) 감지 및 해제 시각까지 대기 (run_plan.bash와 동일)
 # ==============================================================================
 
-# 로그 파일에서 토큰/사용량 한도 도달 여부 확인
 is_usage_limit_reached() {
   local log_file="$1"
   if [[ ! -f "$log_file" ]]; then
     return 1
   fi
-
   grep -qiE \
     'usage limit reached|limit will reset at|hit your limit|resets[[:space:]]+(at[[:space:]]+)?[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)|rate_limit_error|exceed your account'\''s rate limit|Error:[[:space:]]*429|too many requests|5-hour limit|weekly limit' \
     "$log_file"
 }
 
-# 로그 파일에서 해제 시각(Epoch, Retry-After, 또는 시각 문자열)을 파싱하여 대기할 초(seconds) 계산
 calculate_limit_wait_seconds() {
   local log_file="$1"
   local fallback_sec=$((LIMIT_FALLBACK_MINUTES * 60))
@@ -952,7 +903,6 @@ except Exception:
 
 now_ts = int(datetime.datetime.now().timestamp())
 
-# 1) "usage limit reached|1749924000" 형태의 Unix Epoch 타임스탬프 감지
 m_epoch = re.search(r"usage limit reached\|(\d{10})", text, re.IGNORECASE)
 if m_epoch:
     target_ts = int(m_epoch.group(1))
@@ -961,7 +911,6 @@ if m_epoch:
     print(f"{wait_s}|Epoch 타임스탬프 ({reset_str})")
     sys.exit(0)
 
-# 2) "retry-after: 120" 또는 "retry after 5 minutes" 형태 감지
 m_retry = re.search(r"retry[- ]after[:\s]+(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m)?", text, re.IGNORECASE)
 if m_retry:
     val = int(m_retry.group(1))
@@ -972,7 +921,6 @@ if m_retry:
     print(f"{wait_s}|Retry-After ({val}초)")
     sys.exit(0)
 
-# 3) "reset(s) (at) [Month Day,] HH[:MM] [am/pm] [(Timezone)]" 형태 감지
 pattern = re.compile(
     r"resets?(?:\s+at)?\s+"
     r"(?:([A-Za-z]{3,9})\s+(\d{1,2}),?\s+)?"
@@ -1041,7 +989,6 @@ PYEOF
     return 0
   fi
 
-  # Ubuntu GNU date 기반 폴백 파서
   local now_epoch
   now_epoch=$(date +%s)
 
@@ -1078,7 +1025,6 @@ PYEOF
   echo "${fallback_sec}|기본 쿨다운 (${LIMIT_FALLBACK_MINUTES}분)"
 }
 
-# 지정된 초(seconds) 동안 카운트다운을 표시하며 대기 (Ubuntu GNU date & systemd-inhibit 활용)
 wait_for_limit_reset() {
   local log_file="$1"
   local context_label="$2"
@@ -1152,7 +1098,7 @@ wait_for_limit_reset() {
     "low"
 }
 
-# 토큰 한도 대기 및 요구사항 의사결정 가드가 내장된 Claude 실행 래퍼 함수
+# 토큰 한도 대기 및 의사결정 가드가 내장된 Claude 실행 래퍼 함수
 # $1: 사용할 모델명, $2: 세션 이어하기 여부, $3: 프롬프트, $4: 로그 파일 경로, $5: 작업 설명 라벨
 run_claude_with_limit_guard() {
   local target_model="$1"
@@ -1173,7 +1119,6 @@ run_claude_with_limit_guard() {
     LAST_CLAUDE_EXIT_CODE=${PIPESTATUS[0]}
     set -e
 
-    # 1) 출력 로그에서 토큰/사용량 한도 도달 여부 검사
     if is_usage_limit_reached "$log_file"; then
       limit_wait_count=$((limit_wait_count + 1))
       if [[ "$limit_wait_count" -gt "$MAX_LIMIT_WAITS" ]]; then
@@ -1186,27 +1131,23 @@ run_claude_with_limit_guard() {
       if [[ "$RESUME_ON_LIMIT_WAKE" == "true" ]]; then
         current_continue="true"
       fi
-      current_prompt="이전 실행 중 토큰 사용량 한도(Usage Limit)에 도달해 일시 중단되었다가 방금 한도가 해제되었어. 현재까지 작성된 파일 상태와 '${ABS_SPEC_FILE}', '${ABS_DECISIONS_FILE}'을 확인하고, 중단되었던 아래 작업을 이어서 끝까지 완료해줘:
+      current_prompt="이전 실행 중 토큰 사용량 한도(Usage Limit)에 도달해 일시 중단되었다가 방금 한도가 해제되었어. 현재까지 작성된 파일 상태와 '${ABS_SPEC_PLAN_FILE}', '${ABS_DECISIONS_FILE}'을 확인하고, 중단되었던 아래 작업을 이어서 끝까지 완료해줘:
 
 ${prompt_text}"
       continue
     fi
 
-    # 2) 출력 로그에서 요구사항 모호성/충돌(의사결정 요청, [DECISION_REQUIRED]) 감지
     if is_decision_required "$log_file"; then
       USER_DECISION_INPUT=""
       handle_decision_required "$log_file" "$label"
 
-      # 사용자가 결정을 입력한 경우(ask 모드) 즉시 세션을 이어받아 해당 결정대로 수행
-      # 주의: 원래 프롬프트의 [DECISION_REQUIRED] 지침을 다시 보내면 에이전트가 혼동하거나
-      # 파일 쓰기를 생략할 수 있으므로, 명확한 후속 행동 지침만 전달합니다.
       current_continue="true"
       current_prompt="방금 질문한 요구사항 모호성/충돌 사항에 대해 사용자가 다음과 같이 최종 결정했어:
 [사용자 최종 결정]: ${USER_DECISION_INPUT}
 
 이제 결정 요청 블록을 다시 출력하지 말고(해당 마커 문자열을 언급하지도 마), 반드시 Write 또는 Edit 도구를 호출하여 다음 작업을 실제로 디스크에 반영해줘:
 1. '${ABS_DECISIONS_FILE}' 파일에 위 최종 결정 사항을 반영해 저장해.
-2. '${ABS_SPEC_FILE}' 파일이 디스크에 실제로 존재하는지 확인하고, 위 결정을 반영해 해당 섹션(들)을 실제로 수정(Edit)하거나 전체를 다시 작성(Write)해서 저장해."
+2. 방금 작업하던 대상 파일을 이 결정에 맞게 실제로 수정(Edit)하거나 새로 작성(Write)해서 저장해."
       continue
     fi
 
@@ -1215,240 +1156,539 @@ ${prompt_text}"
 }
 
 # ==============================================================================
-# 사양서 파일 누락 시 자동 탐색 및 세션 기반 강제 복구 함수
+# spec-plan.md 파싱 헬퍼: 체크리스트 상태 / Step 번호 / 각 Step의 저장 경로 추출
 # ==============================================================================
-locate_or_recover_spec_file() {
-  local active_spec_model="${1:-}"
 
-  # 1) 이미 정확한 경로에 파일이 존재하면 즉시 성공
-  if [[ -f "$ABS_SPEC_FILE" && -s "$ABS_SPEC_FILE" ]]; then
+# 남은 미완료 항목(- [ ] 또는 * [ ]) 개수 계산
+count_remaining_tasks() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    echo 0
+    return
+  fi
+  grep -cE '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' "$file" || true
+}
+
+# 완료된 항목(- [x] 또는 - [X]) 개수 계산
+count_completed_tasks() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    echo 0
+    return
+  fi
+  grep -cE '^[[:space:]]*[-*][[:space:]]+\[[xX]\]' "$file" || true
+}
+
+# 다음 진행할 첫 번째 미완료 항목 추출 (예: "Step 2: 기능 요구사항 명세")
+get_next_task() {
+  local file="$1"
+  grep -m 1 -E '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' "$file" \
+    | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\][[:space:]]*//' || true
+}
+
+# 계획 파일에 등장하는 모든 Step 번호를 오름차순/중복 제거하여 나열
+get_all_step_numbers() {
+  local file="$1"
+  grep -oE 'Step[[:space:]]+[0-9]+:' "$file" 2>/dev/null | grep -oE '[0-9]+' | sort -n -u || true
+}
+
+# NEXT_TASK 텍스트("Step N: 제목")에서 Step 번호만 추출. 실패 시 빈 문자열
+get_step_number() {
+  local task_text="$1"
+  if [[ "$task_text" =~ ^Step[[:space:]]+([0-9]+): ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo ""
+  fi
+}
+
+# 계획 파일의 "### Step N" 상세 섹션에서 "파일 경로:" 줄의 값만 추출 (없으면 빈 출력)
+get_step_filepath() {
+  local file="$1"
+  local n="$2"
+  awk -v n="$n" '
+    {
+      if ($0 ~ ("^###[[:space:]]+Step[[:space:]]+" n "([^0-9]|$)")) { grab = 1; next }
+      if ($0 ~ /^###[[:space:]]+Step[[:space:]]+[0-9]+/) { grab = 0 }
+      if (grab && $0 ~ /파일[[:space:]]*경로/) {
+        line = $0
+        idx = index(line, ":")
+        if (idx == 0) idx = index(line, "：")
+        if (idx > 0) line = substr(line, idx + 1)
+        gsub(/`/, "", line)
+        gsub(/^[[:space:]]+/, "", line)
+        gsub(/[[:space:]]+$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$file" 2>/dev/null || true
+}
+
+# 계획 파일의 상대 경로 문자열을 WORK_DIR 기준 절대 경로로 변환
+resolve_step_abs_path() {
+  local rel="$1"
+  if [[ -z "$rel" ]]; then
+    echo ""
+    return
+  fi
+  if [[ "$rel" = /* ]]; then
+    echo "$rel"
+  elif command -v realpath >/dev/null 2>&1; then
+    realpath -m "${WORK_DIR}/${rel}"
+  else
+    echo "${WORK_DIR}/${rel}"
+  fi
+}
+
+# 단계 텍스트를 짧은 제목으로 축약 (첫 " — " 앞, 최대 80자)
+short_task() {
+  local t="${1%% — *}"
+  t="${t%% - *}"
+  printf '%s' "${t:0:80}"
+}
+
+# 계획 파일에 체크박스가 하나도 없는 경우 정규화하고, 각 Step마다 "파일 경로:" 메타가
+# 있는지도 확인해 누락되어 있으면 Claude에게 보완을 요청
+ensure_plan_checkbox_format() {
+  local active_plan_model="${1:-}"
+
+  if [[ ! -f "$ABS_SPEC_PLAN_FILE" ]]; then
     return 0
   fi
 
-  echo -e "${YELLOW}[점검] 지정된 경로('${ABS_SPEC_FILE}')에서 파일을 찾지 못해 프로젝트 내 다른 위치를 탐색합니다...${NC}"
+  local total_boxes
+  total_boxes=$(grep -cE '^[[:space:]]*[-*][[:space:]]+\[[[:space:]xX]\]' "$ABS_SPEC_PLAN_FILE" || true)
 
-  # 2) spec/ 디렉터리 및 Git 루트 내에서 최근 30분 내 생성/수정된 .md 파일 탐색
-  local found_spec=""
-  found_spec=$(find "$ABS_SPEC_DIR" -maxdepth 2 -name "*.md" -mmin -30 2>/dev/null | head -n 1 || true)
-
-  if [[ -z "$found_spec" ]]; then
-    local git_root=""
-    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      git_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  local missing_path_steps=()
+  local n fp
+  while IFS= read -r n; do
+    [[ -z "$n" ]] && continue
+    fp=$(get_step_filepath "$ABS_SPEC_PLAN_FILE" "$n")
+    if [[ -z "$fp" ]]; then
+      missing_path_steps+=("$n")
     fi
-    if [[ -n "$git_root" ]]; then
-      found_spec=$(find "$git_root" -maxdepth 3 -name "*.md" -mmin -30 2>/dev/null | grep -v "/${LOG_DIR#./}/" | head -n 1 || true)
-    fi
-  fi
+  done < <(get_all_step_numbers "$ABS_SPEC_PLAN_FILE")
 
-  if [[ -n "$found_spec" && -f "$found_spec" && "$found_spec" != "$ABS_SPEC_FILE" ]]; then
-    echo -e "${GREEN}[자동 감지] '${found_spec}' 위치에 생성된 사양서 파일을 발견하여 '${ABS_SPEC_FILE}'로 복사합니다.${NC}"
-    mkdir -p "$(dirname "$ABS_SPEC_FILE")"
-    cp "$found_spec" "$ABS_SPEC_FILE"
+  if [[ "$total_boxes" -ne 0 && ${#missing_path_steps[@]} -eq 0 ]]; then
     return 0
   fi
 
-  # 3) Claude가 텍스트 응답으로만 사양서를 설명하고 실제 Write 도구를 호출하지 않은 경우:
-  #    직전 대화 세션(--continue)에 요청하여 디스크에 강제로 파일 생성
-  echo -e "${YELLOW}[자동 복구] 에이전트가 텍스트로만 사양서를 응답하고 디스크에 '${ABS_SPEC_FILE}'을 쓰지 않았습니다.${NC}"
-  echo -e "${BLUE}[자동 복구] 직전 세션(--continue)을 이어받아 '${ABS_SPEC_FILE}' 파일로 즉시 저장을 요청합니다...${NC}"
+  echo -e "${YELLOW}[안내] '${SPEC_PLAN_FILE}'의 형식을 점검합니다 (체크박스: ${total_boxes}개, 파일경로 누락: ${#missing_path_steps[@]}개).${NC}"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo -e "${CYAN}[Dry-Run] 실제 실행 시 Claude에게 형식을 정규화하도록 요청합니다.${NC}"
+    return 0
+  fi
 
-  local recover_log="${LOG_DIR}/recover_spec_$(date +"%Y%m%d_%H%M%S").log"
-  local recover_prompt="방금 네가 정리하고 설명한 사양서 내용이 실제 디스크 경로 '${ABS_SPEC_FILE}'에 파일로 생성되지 않았어(또는 다른 경로에 있거나 텍스트로만 출력됨).
-지금 즉시 Write 도구(또는 Bash cat << 'EOF' > '${ABS_SPEC_FILE}')를 실행해서, 방금 정리한 전체 사양서 내용을 정확한 절대 경로 '${ABS_SPEC_FILE}' 파일에 실제로 저장해줘.
-애플리케이션 소스 코드는 수정하지 말고 '${ABS_SPEC_FILE}'(및 필요한 경우 '${ABS_DECISIONS_FILE}') 파일만 디스크에 생성해."
-
-  mkdir -p "$(dirname "$ABS_SPEC_FILE")"
+  local norm_log="${LOG_DIR}/normalize_plan_$(date +"%Y%m%d_%H%M%S").log"
   run_claude_with_limit_guard \
-    "$active_spec_model" \
+    "$active_plan_model" \
+    "false" \
+    "'${ABS_SPEC_PLAN_FILE}' 파일의 기존 내용을 유지하면서 다음을 정규화해서 '${ABS_SPEC_PLAN_FILE}'에 실제로 저장해줘:
+1. 생성할 각 문서 항목이 마크다운 체크박스('- [ ] Step N: 문서 제목') 형식인지 확인하고, 아니면 변환해.
+2. 각 'Step N' 체크박스 아래에 '### Step N' 상세 섹션이 있는지 확인하고, 없으면 추가해.
+3. 각 '### Step N' 섹션에 '- 파일 경로: ${SPEC_DIR}/...' 형식의 줄이 반드시 있어야 해(저장할 문서의 프로젝트 루트 기준 상대 경로). 비어 있으면 적절한 파일명을 정해서 채워줘." \
+    "$norm_log" \
+    "계획 파일 형식 정규화"
+}
+
+# spec-plan.md에 적힌 모든 Step의 파일 경로를 바탕으로 폴더 구조를 미리 생성
+create_spec_folder_structure() {
+  if [[ ! -f "$ABS_SPEC_PLAN_FILE" ]]; then
+    return 0
+  fi
+
+  echo -e "${BLUE}[폴더 구조] '${SPEC_DIR}' 아래 문서 저장 경로를 준비합니다...${NC}"
+
+  local n fp abs_fp dir
+  while IFS= read -r n; do
+    [[ -z "$n" ]] && continue
+    fp=$(get_step_filepath "$ABS_SPEC_PLAN_FILE" "$n")
+    [[ -z "$fp" ]] && continue
+    abs_fp=$(resolve_step_abs_path "$fp")
+    [[ -z "$abs_fp" ]] && continue
+    dir=$(dirname "$abs_fp")
+    mkdir -p "$dir"
+  done < <(get_all_step_numbers "$ABS_SPEC_PLAN_FILE")
+
+  mkdir -p "$ABS_SPEC_DIR"
+  if [[ -d "$ABS_SPEC_DIR" ]]; then
+    echo -e "${CYAN}$(find "$ABS_SPEC_DIR" -maxdepth 3 -type d 2>/dev/null | sed "s#^${WORK_DIR}/##" | sort)${NC}"
+  fi
+}
+
+# ==============================================================================
+# spec-plan.md 파일 누락 시 자동 탐색 및 세션 기반 강제 복구 함수
+# ==============================================================================
+locate_or_recover_spec_plan_file() {
+  local active_plan_model="${1:-}"
+
+  if [[ -f "$ABS_SPEC_PLAN_FILE" && -s "$ABS_SPEC_PLAN_FILE" ]]; then
+    return 0
+  fi
+
+  echo -e "${YELLOW}[점검] 지정된 경로('${ABS_SPEC_PLAN_FILE}')에서 계획 파일을 찾지 못해 프로젝트 내 다른 위치를 탐색합니다...${NC}"
+
+  local found_plan=""
+  local git_root=""
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$git_root" && -f "${git_root}/$(basename "$SPEC_PLAN_FILE")" && "${git_root}/$(basename "$SPEC_PLAN_FILE")" != "$ABS_SPEC_PLAN_FILE" ]]; then
+    found_plan="${git_root}/$(basename "$SPEC_PLAN_FILE")"
+  else
+    found_plan=$(find "$WORK_DIR" -maxdepth 3 -name "$(basename "$SPEC_PLAN_FILE")" -mmin -30 2>/dev/null | head -n 1 || true)
+  fi
+
+  if [[ -n "$found_plan" && -f "$found_plan" && "$found_plan" != "$ABS_SPEC_PLAN_FILE" ]]; then
+    echo -e "${GREEN}[자동 감지] '${found_plan}' 위치에 생성된 계획 파일을 발견하여 '${ABS_SPEC_PLAN_FILE}'로 복사합니다.${NC}"
+    cp "$found_plan" "$ABS_SPEC_PLAN_FILE"
+    return 0
+  fi
+
+  echo -e "${YELLOW}[자동 복구] 에이전트가 텍스트로만 계획을 응답하고 디스크에 '${ABS_SPEC_PLAN_FILE}'을 쓰지 않았습니다.${NC}"
+  echo -e "${BLUE}[자동 복구] 직전 세션(--continue)을 이어받아 '${ABS_SPEC_PLAN_FILE}' 파일로 즉시 저장을 요청합니다...${NC}"
+
+  local recover_log="${LOG_DIR}/recover_plan_$(date +"%Y%m%d_%H%M%S").log"
+  local recover_prompt="방금 네가 정리하고 설명한 문서 생성 계획이 실제 디스크 경로 '${ABS_SPEC_PLAN_FILE}'에 파일로 생성되지 않았어(또는 다른 경로에 있거나 텍스트로만 출력됨).
+지금 즉시 Write 도구를 실행해서, 방금 정리한 전체 계획(문서 목록 체크리스트 + 각 Step의 '파일 경로' 포함 상세 섹션)을 정확한 절대 경로 '${ABS_SPEC_PLAN_FILE}' 파일에 실제로 저장해줘. 아직 개별 문서 파일은 작성하지 말고 계획 파일만 저장해."
+
+  run_claude_with_limit_guard \
+    "$active_plan_model" \
     "true" \
     "$recover_prompt" \
     "$recover_log" \
-    "사양서 디스크 파일 강제 생성 복구"
+    "spec-plan.md 디스크 파일 강제 생성 복구"
 
-  if [[ -f "$ABS_SPEC_FILE" && -s "$ABS_SPEC_FILE" ]]; then
-    echo -e "${GREEN}[복구 성공] '${ABS_SPEC_FILE}' 파일이 정상적으로 생성되었습니다!${NC}"
+  if [[ -f "$ABS_SPEC_PLAN_FILE" && -s "$ABS_SPEC_PLAN_FILE" ]]; then
+    echo -e "${GREEN}[복구 성공] '${ABS_SPEC_PLAN_FILE}' 파일이 정상적으로 생성되었습니다!${NC}"
     return 0
   fi
 
   return 1
 }
 
-# 필수 섹션(REQUIRED_SECTIONS)이 모두 포함되어 있는지 확인하고, 누락된 섹션이 있으면
-# Claude에게 기존 내용을 유지한 채 해당 섹션만 보완하도록 요청 (최대 MAX_RETRIES회 재시도)
-ensure_spec_sections() {
-  local active_spec_model="${1:-}"
-
-  if [[ ! -f "$ABS_SPEC_FILE" ]]; then
-    return 1
-  fi
-
-  local attempt=0
-  while [[ "$attempt" -le "$MAX_RETRIES" ]]; do
-    local missing=()
-    local sec
-    for sec in "${REQUIRED_SECTIONS[@]}"; do
-      if ! grep -qF "## ${sec}" "$ABS_SPEC_FILE"; then
-        missing+=("$sec")
-      fi
-    done
-
-    if [[ ${#missing[@]} -eq 0 ]]; then
-      return 0
-    fi
-
-    attempt=$((attempt + 1))
-    echo -e "${YELLOW}[보완] 사양서에 누락된 섹션이 감지되었습니다 (시도 ${attempt}/$((MAX_RETRIES + 1))): ${missing[*]}${NC}"
-
-    local missing_list
-    missing_list=$(printf '## %s\n' "${missing[@]}")
-
-    local fix_log="${LOG_DIR}/ensure_sections_attempt_${attempt}_$(date +"%Y%m%d_%H%M%S").log"
-    run_claude_with_limit_guard \
-      "$active_spec_model" \
-      "true" \
-      "'${ABS_SPEC_FILE}' 사양서에 아래 섹션 제목이 누락되었어. 기존에 작성된 다른 섹션의 내용은 그대로 유지한 채, 누락된 섹션들을 각 제목 바로 아래에 실질적인 내용으로 채워 넣어 전체 파일을 다시 저장해줘(Edit 또는 Write 사용):
-
-${missing_list}
-
-주의: 제목만 추가하고 내용을 비워두면 안 되고, 원래 요구사항과 코드베이스 컨텍스트에 맞게 구체적으로 작성해야 해." \
-      "$fix_log" \
-      "사양서 누락 섹션 보완"
-  done
-
-  echo -e "${YELLOW}[안내] 최대 재시도 후에도 일부 섹션이 누락된 상태입니다. 사양서를 직접 확인해 보완해 주세요.${NC}"
-  return 1
-}
-
 # ==============================================================================
-# 사양서 초안 생성 + 자기 검토/보강(고도화) 패스
+# Phase A: 요구사항 분석 → 필요한 문서 목록/폴더 구조 계획(spec-plan.md) 수립
 # ==============================================================================
-generate_spec_from_requirements() {
+generate_spec_plan() {
   local req_text="$1"
-  local active_spec_model="${SPEC_MODEL:-$MODEL}"
+  local active_plan_model="${PLAN_MODEL:-$MODEL}"
 
   echo -e "${BLUE}======================================================================${NC}"
-  echo -e "${BOLD}${BLUE} [사양서 생성] 요구사항 분석 및 '${SPEC_FILE_REL}' 작성${NC}"
+  echo -e "${BOLD}${BLUE} [문서 계획 수립] 요구사항 분석 및 '${SPEC_PLAN_FILE}' 생성${NC}"
   echo -e "${BLUE}======================================================================${NC}"
 
-  mkdir -p "$(dirname "$ABS_SPEC_FILE")"
-
-  # 기존 사양서 파일 백업 처리
-  if [[ -f "$ABS_SPEC_FILE" && "$SPEC_MODE_ACTION" == "overwrite" && "$DRY_RUN" != "true" ]]; then
-    local backup_file="${LOG_DIR}/$(basename "$ABS_SPEC_FILE").bak.$(date +"%Y%m%d_%H%M%S")"
-    cp "$ABS_SPEC_FILE" "$backup_file"
-    echo -e "${YELLOW}[백업] 기존 '${SPEC_FILE_REL}' 파일을 '${backup_file}'에 백업했습니다.${NC}"
+  if [[ -f "$ABS_SPEC_PLAN_FILE" && "$PLAN_MODE_ACTION" == "overwrite" && "$DRY_RUN" != "true" ]]; then
+    local backup_file="${LOG_DIR}/$(basename "$SPEC_PLAN_FILE").bak.$(date +"%Y%m%d_%H%M%S")"
+    cp "$ABS_SPEC_PLAN_FILE" "$backup_file"
+    echo -e "${YELLOW}[백업] 기존 '${SPEC_PLAN_FILE}' 파일을 '${backup_file}'에 백업했습니다.${NC}"
   fi
 
   local mode_instruction=""
-  if [[ -f "$ABS_SPEC_FILE" && "$SPEC_MODE_ACTION" == "append" ]]; then
-    mode_instruction="기존 '${ABS_SPEC_FILE}' 파일의 내용을 유지한 채, 파일 하단에 새로운 요구사항에 대한 아래와 동일한 섹션 구조의 추가 내용을 덧붙여 저장해줘."
+  if [[ -f "$ABS_SPEC_PLAN_FILE" && "$PLAN_MODE_ACTION" == "append" ]]; then
+    mode_instruction="기존 '${ABS_SPEC_PLAN_FILE}' 파일의 내용(완료된 Step 포함)을 유지한 채, 기존 Step 번호와 겹치지 않는 번호부터 시작해 새로운 요구사항을 위한 문서 항목들을 파일 하단에 추가해줘."
   else
-    mode_instruction="반드시 Write 도구를 사용하여 정확한 절대 경로 '${ABS_SPEC_FILE}'에 파일을 새로 작성(저장)해줘."
+    mode_instruction="반드시 Write 도구를 사용하여 정확한 절대 경로 '${ABS_SPEC_PLAN_FILE}'에 파일을 새로 작성(저장)해줘."
   fi
 
-  local section_list
-  section_list=$(printf '## %s\n' "${REQUIRED_SECTIONS[@]}")
-
   local conflict_policy
-  conflict_policy=$(get_conflict_policy_instruction)
+  conflict_policy=$(get_conflict_policy_instruction "'${ABS_SPEC_PLAN_FILE}'")
 
-  local spec_prompt="너는 수석 프로덕트 매니저 겸 소프트웨어 아키텍트야. 다음은 개략적으로만 적힌 사용자 요구사항이야. 먼저 현재 프로젝트 디렉터리('${WORK_DIR}')의 코드베이스를 탐색·분석해 기술 스택, 아키텍처, 기존 컨벤션, 관련 기존 기능을 파악한 뒤, 그 요구사항을 개발자가 추가 질문 없이 바로 구현에 착수할 수 있을 정도로 구체적이고 고도화된 요구사항 사양서로 발전시켜 정확한 절대 경로 '${ABS_SPEC_FILE}'에 작성해줘.
+  local plan_prompt="너는 수석 프로덕트 매니저 겸 소프트웨어 아키텍트야. 다음은 개략적으로만 적힌 사용자 요구사항이야. 먼저 현재 프로젝트 디렉터리('${WORK_DIR}')의 코드베이스를 탐색·분석해 기술 스택, 아키텍처, 기존 컨벤션, 관련 기존 기능을 파악한 뒤, 이 요구사항을 개발에 바로 착수할 수 있는 수준으로 구체화하기 위해 어떤 '문서들'이 필요한지 결정하고, 그 계획을 '${ABS_SPEC_PLAN_FILE}'에 작성해줘. (실제 문서 내용은 아직 쓰지 마. 이번 단계는 계획 수립만 해.)
 
 [사용자 요구사항 (개략적/원문)]
 ${req_text}
 
-[사양서 작성 지침]
-1. 현재 프로젝트의 기술 스택, 디렉터리 구조, 기존 코드 컨벤션, 테스트 환경, 관련된 기존 기능/모듈을 먼저 파악해.
-2. 애플리케이션 소스 코드는 수정하지 말고, 오직 사양서 작성과 '${ABS_SPEC_FILE}'(및 필요 시 의사결정 기록용 '${ABS_DECISIONS_FILE}') 파일 생성만 수행해.
-3. ${mode_instruction} (주의: 채팅 응답으로만 사양서를 출력하고 실제 디스크 파일 '${ABS_SPEC_FILE}'을 쓰지 않으면 스크립트가 실패하므로 반드시 Write 도구를 호출해 파일로 저장해야 해!)
-4. 사양서는 반드시 아래 순서의 마크다운 섹션 제목을 '## '로 시작해 그대로(제목 문구 변경 금지) 포함해야 하고, 각 섹션에는 실질적인 내용을 채워 넣어야 해(해당 없음인 섹션도 '해당 없음' 사유를 명시):
-${section_list}
-   - '3. 기능 요구사항'은 FR-1, FR-2 … 형태로 번호를 매기고 각각 사용자 관점의 동작을 구체적으로 서술해.
-   - '5. 데이터 및 API 설계'는 관련된 데이터 모델/스키마 변경, API 엔드포인트(메서드/경로/요청·응답 필드), 또는 UI 컴포넌트/상태 변경 등 기존 코드베이스 컨벤션에 맞춰 구체적으로 적어.
-   - '7. 수용 기준'은 각 기능 요구사항(FR-N)에 대응하는, 테스트로 검증 가능한 Given/When/Then 또는 체크리스트 형태로 작성해.
-   - '8. 테스트 계획'은 단위/통합/수동 테스트 중 무엇이 필요한지와 핵심 테스트 케이스를 나열해.
-   - '10. 미결 이슈'에는 사양서 작성 중 스스로 보수적으로 가정하고 넘어간 사항, 혹은 추가 확인이 필요한 질문을 남겨.
-5. 모호한 표현(예: '적절히', '필요하면')을 피하고, 수치/기준/예시를 구체적으로 명시해.
+[계획 수립 지침]
+1. 현재 프로젝트의 기술 스택, 디렉터리 구조, 기존 코드 컨벤션, 관련된 기존 기능/모듈을 먼저 파악해.
+2. 요구사항의 규모와 성격에 맞게 필요한 문서 목록을 정해. 작은 기능이면 2~4개, 복잡한 기능/시스템이면 더 많아질 수 있어. 전형적으로 고려할 문서 종류(상황에 맞지 않으면 생략 가능):
+   - 개요/배경 및 목표·범위 문서
+   - 기능 요구사항 명세 (FR-N 형태)
+   - 데이터 모델 및 API(또는 UI 컴포넌트/상태) 설계 문서
+   - 비기능 요구사항(성능/보안/로깅/모니터링) 문서
+   - 예외 처리·엣지 케이스 및 수용 기준 문서
+   - 테스트 계획 문서
+   - 마이그레이션/롤아웃 계획 문서 (기존 시스템에 영향이 있을 때만)
+3. 각 문서를 '${ABS_SPEC_DIR}' 디렉터리 아래 어떤 상대 경로에 저장할지 정해(문서가 많으면 하위 폴더로 묶어도 됨. 예: '${SPEC_DIR}/01-overview.md', '${SPEC_DIR}/api/02-endpoints.md' 등). 실제로 폴더를 만들 필요는 없어(스크립트가 처리함).
+4. 애플리케이션 소스 코드는 수정하지 말고, 오직 계획 수립과 '${ABS_SPEC_PLAN_FILE}'(및 필요 시 의사결정 기록용 '${ABS_DECISIONS_FILE}') 파일 생성만 수행해.
+5. ${mode_instruction} (주의: 채팅 응답으로만 계획을 출력하고 실제 디스크 파일 '${ABS_SPEC_PLAN_FILE}'을 쓰지 않으면 스크립트가 실패하므로 반드시 Write 도구를 호출해 파일로 저장해야 해!)
+6. '${ABS_SPEC_PLAN_FILE}' 파일은 다음 구조를 포함해야 해:
+   - 머리말: 요구사항 요약과 전체 문서 구조를 이렇게 나눈 이유
+   - 문서 목록 체크리스트: 각 문서마다 '- [ ] Step N: 문서 제목' 한 줄(80자 이내, 상세 설명이나 ' — ' 이후 설명 금지)
+   - 각 Step마다 별도 '### Step N' 섹션(체크박스 아래, 체크박스 자체는 없음)에 아래 항목을 모두 포함:
+     - 파일 경로: (프로젝트 루트 기준 상대 경로, 반드시 '${SPEC_DIR}/'로 시작)
+     - 목적: (이 문서가 왜 필요한지)
+     - 포함할 내용(개요): (이 문서에 들어갈 구체적인 섹션/항목 목록)
+     - 의존 문서: (먼저 읽어야 할 다른 Step 번호, 없으면 '없음')
+     - 문서별 검증 기준: (이 문서가 '완성됐다'고 판단할 기준 — 구체적이고 확인 가능하게)
+7. 각 Step은 한 번의 에이전트 세션에서 작성·자기검증까지 끝낼 수 있는 적절한 크기로 나눠.
 
 ${conflict_policy}"
 
-  build_claude_args "$active_spec_model" "false"
+  build_claude_args "$active_plan_model" "false"
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    echo -e "${YELLOW}[Dry-Run] 사양서 생성 실행 예정 명령어:${NC}"
-    echo "claude ${CLAUDE_ARGS[*]} \"<SPEC_PROMPT>\""
-    echo -e "\n${YELLOW}[Dry-Run] 사양서 생성 프롬프트:${NC}\n${spec_prompt}\n"
+    echo -e "${YELLOW}[Dry-Run] 계획 수립 실행 예정 명령어:${NC}"
+    echo "claude ${CLAUDE_ARGS[*]} \"<PLAN_PROMPT>\""
+    echo -e "\n${YELLOW}[Dry-Run] 계획 수립 프롬프트:${NC}\n${plan_prompt}\n"
     return 0
   fi
 
   local timestamp
   timestamp=$(date +"%Y%m%d_%H%M%S")
-  local spec_log="${LOG_DIR}/draft_${timestamp}.log"
+  local plan_log="${LOG_DIR}/phaseA_planning_${timestamp}.log"
 
-  echo -e "${CYAN}▶ 코드베이스를 분석하고 '${SPEC_FILE_REL}' 초안을 작성하고 있습니다...${NC}"
+  echo -e "${CYAN}▶ 코드베이스를 분석하고 문서 생성 계획을 세우고 있습니다...${NC}"
   run_claude_with_limit_guard \
-    "$active_spec_model" \
+    "$active_plan_model" \
     "false" \
-    "$spec_prompt" \
-    "$spec_log" \
-    "사양서 초안 작성 (${SPEC_FILE_REL})"
+    "$plan_prompt" \
+    "$plan_log" \
+    "문서 계획 수립 (${SPEC_PLAN_FILE} 생성)"
 
-  # 파일이 지정된 경로에 없으면 탐색 또는 직전 세션(--continue)을 통해 강제 저장 복구
-  if ! locate_or_recover_spec_file "$active_spec_model"; then
-    echo -e "${RED}[오류] 자동 복구 시도 후에도 '${ABS_SPEC_FILE}' 파일이 생성되지 않았습니다. 로그를 확인해 주세요: ${spec_log}${NC}" >&2
+  if ! locate_or_recover_spec_plan_file "$active_plan_model"; then
+    echo -e "${RED}[오류] 자동 복구 시도 후에도 '${ABS_SPEC_PLAN_FILE}' 파일이 생성되지 않았습니다. 로그를 확인해 주세요: ${plan_log}${NC}" >&2
     exit 1
   fi
 
-  ensure_spec_sections "$active_spec_model" || true
+  ensure_plan_checkbox_format "$active_plan_model"
+  create_spec_folder_structure
 
-  echo -e "${GREEN}[초안 완료] '${SPEC_FILE_REL}' 초안이 생성되었습니다.${NC}"
+  local total_created
+  total_created=$(count_remaining_tasks "$ABS_SPEC_PLAN_FILE")
+  echo -e "\n${GREEN}[계획 수립 완료] '${SPEC_PLAN_FILE}'에 총 ${total_created}개의 생성할 문서가 계획되었습니다.${NC}"
 
-  if [[ "$SPEC_ONLY_DRAFT" == "true" ]]; then
-    return 0
+  if [[ "$AUTO_COMMIT" == "true" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [[ -n "$(git status --porcelain "$ABS_SPEC_PLAN_FILE" "$ABS_DECISIONS_FILE" 2>/dev/null)" ]]; then
+      git add "$ABS_SPEC_PLAN_FILE"
+      [[ -f "$ABS_DECISIONS_FILE" ]] && git add "$ABS_DECISIONS_FILE"
+      git commit -m "docs(spec): generate document plan in ${SPEC_PLAN_FILE}" || true
+      echo -e "${BLUE}[Git] 생성된 '${SPEC_PLAN_FILE}' 파일이 커밋되었습니다.${NC}"
+    fi
+  fi
+}
+
+# ==============================================================================
+# Phase B: spec-plan.md의 미완료 문서를 하나씩 생성 + 자기검증 + 체크박스 갱신
+# $1: NEXT_TASK 텍스트 ("Step N: 문서 제목"). 성공 시 0, 재시도 소진 시 1 반환.
+# 성공/실패와 무관하게 LAST_STEP_LOG_FILE, LAST_STEP_DOC_PATH 전역 변수를 채운다.
+# ==============================================================================
+run_document_step() {
+  local next_task="$1"
+  local step_num
+  step_num=$(get_step_number "$next_task")
+
+  if [[ -z "$step_num" ]]; then
+    echo -e "${RED}[오류] '${next_task}' 항목에서 Step 번호를 인식할 수 없습니다. '${SPEC_PLAN_FILE}' 형식을 확인해 주세요.${NC}" >&2
+    return 1
   fi
 
-  # 자기 검토/보강(고도화) 패스: 요구사항/코드베이스와 대조해 누락·모호성을 보완
-  local pass
-  for ((pass = 1; pass <= REFINE_PASSES; pass++)); do
-    echo -e "\n${BLUE}----------------------------------------------------------------------${NC}"
-    echo -e "${BOLD}${BLUE} [보강 ${pass}/${REFINE_PASSES}] 사양서 자기 검토 및 고도화${NC}"
-    echo -e "${BLUE}----------------------------------------------------------------------${NC}"
+  local doc_rel
+  doc_rel=$(get_step_filepath "$ABS_SPEC_PLAN_FILE" "$step_num")
+  if [[ -z "$doc_rel" ]]; then
+    doc_rel="${SPEC_DIR}/doc-step-${step_num}.md"
+    echo -e "${YELLOW}[경고] Step ${step_num}에 '파일 경로' 메타가 없어 '${doc_rel}'로 대체합니다.${NC}"
+  fi
+  local doc_abs
+  doc_abs=$(resolve_step_abs_path "$doc_rel")
+  mkdir -p "$(dirname "$doc_abs")"
 
-    local refine_prompt="너는 방금 '${ABS_SPEC_FILE}'에 작성한 요구사항 사양서를 비판적으로 검토하는 시니어 리뷰어 역할이야.
-1. '${ABS_SPEC_FILE}'의 현재 내용 전체와 아래 원본 사용자 요구사항, 그리고 프로젝트 코드베이스를 다시 대조해.
+  LAST_STEP_DOC_PATH="$doc_abs"
 
-[원본 사용자 요구사항]
-${req_text}
+  local next_short
+  next_short="$(short_task "$next_task")"
 
-2. 다음 관점에서 부족한 부분을 찾아 사양서를 보완해(기존에 이미 잘 작성된 내용은 그대로 유지):
-   - 원본 요구사항 중 사양서에 반영되지 않은 내용이 있는가?
-   - 기능 요구사항(FR-N) 중 빠뜨린 사용자 시나리오, 권한/인증 분기, 동시성/중복 처리 등 엣지 케이스가 있는가?
-   - 수용 기준이 모든 FR-N을 실제로 테스트 가능한 수준으로 커버하는가?
-   - 비기능 요구사항(성능/보안/로깅/모니터링)이 이 기능 규모에 비해 충분한가?
-   - '미결 이슈' 중 이번 검토로 스스로 합리적으로 결정해 해소할 수 있는 항목이 있는가? (해소했다면 '${ABS_DECISIONS_FILE}'에도 근거를 남겨)
-3. 보완한 전체 사양서를 Write 또는 Edit 도구로 '${ABS_SPEC_FILE}'에 다시 저장해. 섹션 제목과 구조(## 1.~10.)는 그대로 유지해.
+  local conflict_policy
+  conflict_policy=$(get_conflict_policy_instruction "'${doc_abs}'")
+
+  local prompt="'${ABS_SPEC_PLAN_FILE}'에서 'Step ${step_num}' 체크리스트 항목과 그 아래 '### Step ${step_num}' 상세 섹션만 읽어(grep으로 위치를 찾아서 필요한 부분만 읽을 것; 파일 전체를 읽지 말 것). 상세 섹션의 '의존 문서'에 다른 Step 번호가 적혀 있으면, 그 Step의 '파일 경로'에 적힌 문서를 먼저 읽고 용어·형식·ID를 일관되게 맞춰.
+
+정확히 이번 문서(Step ${step_num})만 작업해:
+1. 상세 섹션의 '목적'과 '포함할 내용'에 따라 문서를 작성해 정확한 절대 경로 '${doc_abs}'에 저장해(Write 도구). 모호한 표현(예: '적절히', '필요하면') 대신 구체적인 기준·수치·예시를 써.
+2. 작성 후 반드시 스스로 검증(문서별 검증)해: 상세 섹션의 '문서별 검증 기준'을 모두 충족하는지, 의존 문서와 내용이 모순되지 않는지 다시 확인하고, 미흡한 부분이 있으면 즉시 고쳐서 같은 파일에 다시 저장해.
+3. 검증까지 끝났으면 '${ABS_SPEC_PLAN_FILE}'을 Edit 도구로 열어 'Step ${step_num}' 체크박스만 '- [ ]'에서 '- [x]'로 바꿔. 다른 Step의 체크박스나 내용은 건드리지 마.
+4. 다음 미완료 Step까지 미리 진행하지 말고, 오직 이번 Step(${next_short})에만 집중해.
 
 ${conflict_policy}"
 
-    local refine_log="${LOG_DIR}/refine_pass${pass}_$(date +"%Y%m%d_%H%M%S").log"
-    run_claude_with_limit_guard \
-      "$active_spec_model" \
-      "true" \
-      "$refine_prompt" \
-      "$refine_log" \
-      "사양서 보강 패스 ${pass}/${REFINE_PASSES}"
+  local attempt=0
+  local success="false"
+  local log_file=""
 
-    ensure_spec_sections "$active_spec_model" || true
-    echo -e "${GREEN}[보강 ${pass}/${REFINE_PASSES} 완료]${NC}"
+  while [[ "$attempt" -le "$MAX_RETRIES" ]]; do
+    attempt=$((attempt + 1))
+    local timestamp
+    timestamp=$(date +"%Y%m%d_%H%M%S")
+    log_file="${LOG_DIR}/step_${step_num}_attempt_${attempt}_${timestamp}.log"
+
+    if [[ "$attempt" -gt 1 ]]; then
+      echo -e "${YELLOW}[재시도 ${attempt}/$((MAX_RETRIES + 1))] 이전 시도에서 문서가 저장되지 않았거나 체크박스가 갱신되지 않았습니다.${NC}"
+    fi
+
+    run_claude_with_limit_guard \
+      "$MODEL" \
+      "false" \
+      "$prompt" \
+      "$log_file" \
+      "Step ${step_num}: ${next_task}"
+
+    local exit_code="$LAST_CLAUDE_EXIT_CODE"
+
+    local still_unchecked="false"
+    if [[ "$(get_next_task "$ABS_SPEC_PLAN_FILE")" == "$next_task" ]]; then
+      still_unchecked="true"
+    fi
+
+    local doc_written="false"
+    if [[ -f "$doc_abs" && -s "$doc_abs" ]]; then
+      doc_written="true"
+    fi
+
+    if [[ "$exit_code" -eq 0 && "$doc_written" == "true" && "$still_unchecked" == "false" ]]; then
+      success="true"
+      break
+    fi
+
+    prompt="이전 시도에서 '${next_short}' 문서(Step ${step_num})가 완전히 마무리되지 않았어. 다음을 확인해:
+- 문서 파일이 '${doc_abs}'에 실제로 저장되어 있는지 (현재 상태: $([[ "$doc_written" == "true" ]] && echo "존재함" || echo "존재하지 않음"))
+- '${ABS_SPEC_PLAN_FILE}'에서 'Step ${step_num}' 체크박스가 '- [x]'로 바뀌었는지 (현재 상태: $([[ "$still_unchecked" == "true" ]] && echo "아직 미완료" || echo "완료됨"))
+누락된 부분을 끝까지 완료하고, Write/Edit 도구로 반드시 디스크에 반영해줘.
+
+${conflict_policy}"
   done
 
+  LAST_STEP_LOG_FILE="$log_file"
+
+  if [[ "$success" == "true" ]]; then
+    echo -e "${GREEN}[문서 완료] Step ${step_num}: '${next_short}' → '${doc_rel}'${NC}"
+    return 0
+  fi
+
+  echo -e "${RED}[중단] Step ${step_num}('${next_short}')을 $((MAX_RETRIES + 1))회 시도했으나 완료되지 않았습니다.${NC}" >&2
+  echo -e "${RED}마지막 로그 파일을 확인해 주세요: ${log_file}${NC}" >&2
+  return 1
+}
+
+# ==============================================================================
+# Stage C: 문서간 충돌 검증 — 완성된 모든 문서를 함께 읽혀 모순/불일치를 찾아 수정
+# ==============================================================================
+cross_document_conflict_check() {
+  local active_model="$MODEL"
+
+  local doc_list
+  doc_list=$(find "$ABS_SPEC_DIR" -type f -name "*.md" 2>/dev/null | sort)
+  if [[ -z "$doc_list" ]]; then
+    echo -e "${YELLOW}[안내] '${SPEC_DIR}' 아래 생성된 문서가 없어 문서간 충돌 검증을 건너뜁니다.${NC}"
+    return 0
+  fi
+
+  echo -e "\n${BLUE}======================================================================${NC}"
+  echo -e "${BOLD}${BLUE} [문서간 충돌 검증] 완성된 문서 세트의 모순/불일치를 검토합니다${NC}"
+  echo -e "${BLUE}======================================================================${NC}"
+
+  local doc_list_rel
+  doc_list_rel=$(echo "$doc_list" | sed "s#^${WORK_DIR}/##")
+
+  local conflict_policy
+  conflict_policy=$(get_conflict_policy_instruction "'${ABS_SPEC_DIR}' 내 관련 문서들")
+
+  local prompt="너는 시니어 아키텍트 리뷰어야. '${ABS_SPEC_PLAN_FILE}'의 머리말(요구사항 요약)을 먼저 읽고, 아래 목록의 모든 문서를 전부 읽어 서로 충돌하거나 모순되는 부분이 있는지 검토해:
+
+${doc_list_rel}
+
+[검토 관점]
+1. 두 개 이상의 문서가 같은 항목(동일 기능/필드/정책)에 대해 서로 다른 내용을 기술하고 있는가?
+2. 문서 간에 용어나 식별자(예: FR 번호, 필드명, 엔드포인트 경로)가 일치하지 않는가?
+3. 한 문서가 다른 문서를 참조하는데 그 내용이 실제로 존재하지 않거나 바뀌었는가(끊어진 참조)?
+4. 어떤 문서가 다른 문서와 전제(가정)가 서로 다른가?
+
+[처리 방법]
+- 사소하거나 명백한 불일치는 코드베이스/요구사항과 더 부합하는 쪽을 기준으로 즉시 Edit 도구로 관련 문서들을 직접 고쳐.
+- 비즈니스적으로 어느 쪽이 맞는지 사람이 결정해야 하는 충돌만 아래 의사결정 지침을 따라.
+- 마지막에 발견한 충돌과 수정 내역을 간단히 요약해서 출력해(어떤 문서를 왜 고쳤는지).
+
+${conflict_policy}"
+
+  local timestamp
+  timestamp=$(date +"%Y%m%d_%H%M%S")
+  local log_file="${LOG_DIR}/cross_check_${timestamp}.log"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    return 0
+  fi
+
+  run_claude_with_limit_guard \
+    "$active_model" \
+    "false" \
+    "$prompt" \
+    "$log_file" \
+    "문서간 충돌 검증"
+
+  echo -e "${GREEN}[완료] 문서간 충돌 검증이 끝났습니다.${NC}"
+}
+
+# ==============================================================================
+# Stage D: 최종 중복/충돌 검사 및 최적화 — 문서 세트 전체를 마지막으로 정리
+# ==============================================================================
+final_optimize_documents() {
+  local active_model="$MODEL"
+
+  local doc_list
+  doc_list=$(find "$ABS_SPEC_DIR" -type f -name "*.md" 2>/dev/null | sort)
+  if [[ -z "$doc_list" ]]; then
+    echo -e "${YELLOW}[안내] '${SPEC_DIR}' 아래 생성된 문서가 없어 최종 최적화를 건너뜁니다.${NC}"
+    return 0
+  fi
+
+  echo -e "\n${BLUE}======================================================================${NC}"
+  echo -e "${BOLD}${BLUE} [최종 최적화] 문서 세트의 중복/잔여 충돌을 정리하고 인덱스를 만듭니다${NC}"
+  echo -e "${BLUE}======================================================================${NC}"
+
+  local doc_list_rel
+  doc_list_rel=$(echo "$doc_list" | sed "s#^${WORK_DIR}/##")
+
+  local conflict_policy
+  conflict_policy=$(get_conflict_policy_instruction "'${ABS_SPEC_DIR}' 내 관련 문서들")
+
+  local index_file="${ABS_SPEC_DIR}/README.md"
+  local prompt="너는 이 문서 세트의 마지막 편집자야. '${ABS_SPEC_PLAN_FILE}'의 머리말을 참고하고, 아래 모든 문서를 다시 한번 전체적으로 검토해:
+
+${doc_list_rel}
+
+[마지막 정리 작업]
+1. 같은 내용이 둘 이상의 문서에 거의 그대로 반복되어 있으면, 가장 적절한 '단일 출처' 문서에만 남기고 다른 문서에서는 간단한 참조(문서명/섹션 언급)로 축약해.
+2. Stage C 이후에도 남아있는 사양 충돌이나 중복이 있으면 해소해(비즈니스 결정이 필요한 경우만 아래 지침의 [DECISION_REQUIRED] 사용).
+3. 문서 전체의 용어·번호 체계(FR-N 등)가 일관되는지 마지막으로 확인하고 다듬어.
+4. '${index_file}' 파일을 새로 작성(또는 있으면 갱신)해서 전체 문서 목록, 각 문서 한 줄 요약, 추천 열람 순서를 안내해.
+5. 이번 단계에서 수정한 문서와 그 이유를 요약해서 출력해.
+
+${conflict_policy}"
+
+  local timestamp
+  timestamp=$(date +"%Y%m%d_%H%M%S")
+  local log_file="${LOG_DIR}/final_optimize_${timestamp}.log"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    return 0
+  fi
+
+  run_claude_with_limit_guard \
+    "$active_model" \
+    "false" \
+    "$prompt" \
+    "$log_file" \
+    "최종 중복/충돌 검사 및 최적화"
+
+  echo -e "${GREEN}[완료] 최종 최적화가 끝났습니다.${NC}"
+
   if [[ "$AUTO_COMMIT" == "true" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    if [[ -n "$(git status --porcelain "$ABS_SPEC_FILE" "$ABS_DECISIONS_FILE" 2>/dev/null)" ]]; then
-      git add "$ABS_SPEC_FILE"
+    if [[ -n "$(git status --porcelain "$ABS_SPEC_DIR" "$ABS_DECISIONS_FILE" 2>/dev/null)" ]]; then
+      git add "$ABS_SPEC_DIR"
       [[ -f "$ABS_DECISIONS_FILE" ]] && git add "$ABS_DECISIONS_FILE"
-      git commit -m "docs(spec): generate spec ${SPEC_FILE_REL}" || true
-      echo -e "${BLUE}[Git] 생성된 '${SPEC_FILE_REL}' 파일이 커밋되었습니다.${NC}"
+      git commit -m "docs(spec): cross-check and optimize generated document set" || true
+      echo -e "${BLUE}[Git] 최종 문서 세트가 커밋되었습니다.${NC}"
     fi
   fi
 }
@@ -1457,49 +1697,146 @@ ${conflict_policy}"
 # 메인 흐름
 # ==============================================================================
 
-if [[ "$RECOVER_LAST_SPEC" == "true" ]]; then
-  echo -e "${BLUE}[세션 복구 모드] 직전 Claude 세션(--continue)에서 작성된 사양서를 '${ABS_SPEC_FILE}'로 복구합니다...${NC}"
-  if ! locate_or_recover_spec_file "${SPEC_MODEL:-$MODEL}"; then
-    echo -e "${RED}[오류] 직전 세션에서 '${ABS_SPEC_FILE}'을 복구하지 못했습니다.${NC}" >&2
+if [[ "$RECOVER_LAST_PLAN" == "true" ]]; then
+  echo -e "${BLUE}[세션 복구 모드] 직전 Claude 세션(--continue)에서 수립된 계획을 '${ABS_SPEC_PLAN_FILE}'로 복구합니다...${NC}"
+  if ! locate_or_recover_spec_plan_file "${PLAN_MODEL:-$MODEL}"; then
+    echo -e "${RED}[오류] 직전 세션에서 '${ABS_SPEC_PLAN_FILE}'을 복구하지 못했습니다.${NC}" >&2
     exit 1
   fi
-  ensure_spec_sections "${SPEC_MODEL:-$MODEL}" || true
-  echo -e "\n${GREEN}[완료] '${SPEC_FILE_REL}' 복구가 완료되었습니다.${NC}"
-  exit 0
-fi
+elif [[ -n "$REQUIREMENTS" ]]; then
+  generate_spec_plan "$REQUIREMENTS"
 
-if [[ -z "$REQUIREMENTS" ]]; then
+  if [[ "$PLAN_ONLY" == "true" ]]; then
+    echo -e "\n${GREEN}[종료] --plan-only 옵션이 지정되어 계획 수립 후 종료합니다. 생성된 '${SPEC_PLAN_FILE}'을 확인해 보세요.${NC}"
+    exit 0
+  fi
+
+  if [[ "$CONFIRM_PLAN" == "true" && "$DRY_RUN" != "true" && -t 0 ]]; then
+    echo -e "\n${CYAN}==================== 생성된 ${SPEC_PLAN_FILE} 내용 ====================${NC}"
+    cat "$ABS_SPEC_PLAN_FILE"
+    echo -e "${CYAN}======================================================================${NC}"
+    read -r -p "위 계획대로 문서 생성을 시작할까요? [Y/n] " answer
+    case "${answer:-Y}" in
+      [Yy]*|"")
+        echo -e "${GREEN}문서 생성을 시작합니다.${NC}"
+        ;;
+      *)
+        echo -e "${YELLOW}사용자 요청으로 실행을 중단했습니다. '${SPEC_PLAN_FILE}'을 수정한 뒤 다시 실행할 수 있습니다.${NC}"
+        exit 0
+        ;;
+    esac
+  fi
+elif [[ ! -f "$ABS_SPEC_PLAN_FILE" ]]; then
   if [[ -t 0 ]]; then
+    echo -e "${YELLOW}[안내] '${SPEC_PLAN_FILE}' 파일이 없으며 전달된 요구사항도 없습니다.${NC}"
     echo -e "${CYAN}구현할 개략적인 요구사항을 입력해 주세요 (입력 후 Enter, 취소는 Ctrl+C):${NC}"
     read -r -p "> " REQUIREMENTS
-  fi
-  if [[ -z "$REQUIREMENTS" ]]; then
-    echo -e "${RED}[오류] 요구사항이 전달되지 않았습니다 (-q/--req, -i/--req-file, 위치 인자, 또는 stdin 필요).${NC}" >&2
+    if [[ -z "$REQUIREMENTS" ]]; then
+      echo -e "${RED}[오류] 요구사항이 입력되지 않아 종료합니다.${NC}" >&2
+      exit 1
+    fi
+    generate_spec_plan "$REQUIREMENTS"
+  else
+    echo -e "${RED}[오류] '${SPEC_PLAN_FILE}' 파일이 존재하지 않으며 요구사항(-q/--req, -i/--req-file, 위치 인자, stdin)도 전달되지 않았습니다.${NC}" >&2
     usage
     exit 1
   fi
 fi
 
-generate_spec_from_requirements "$REQUIREMENTS"
+if [[ "$DRY_RUN" == "true" && ! -f "$ABS_SPEC_PLAN_FILE" ]]; then
+  echo -e "${YELLOW}[Dry-Run] 현재 '${SPEC_PLAN_FILE}' 파일이 없으므로 계획 수립 후 생성될 예정입니다.${NC}"
+  exit 0
+fi
 
 if [[ "$DRY_RUN" == "true" ]]; then
   exit 0
 fi
 
-if [[ "$CONFIRM_SPEC" == "true" && -t 0 ]]; then
-  echo -e "\n${CYAN}==================== 생성된 ${SPEC_FILE_REL} 내용 ====================${NC}"
-  cat "$ABS_SPEC_FILE"
-  echo -e "${CYAN}======================================================================${NC}"
+# 기존 spec-plan.md로 재개하는 경우(요구사항 없이 재실행)에도 형식/폴더가 준비되어 있는지 확인
+ensure_plan_checkbox_format "${PLAN_MODEL:-$MODEL}"
+create_spec_folder_structure
+
+INITIAL_REMAINING=$(count_remaining_tasks "$ABS_SPEC_PLAN_FILE")
+INITIAL_COMPLETED=$(count_completed_tasks "$ABS_SPEC_PLAN_FILE")
+TOTAL_DOCS=$((INITIAL_REMAINING + INITIAL_COMPLETED))
+
+echo -e "\n${BLUE}======================================================================${NC}"
+echo -e "${BOLD}${BLUE} [문서 생성] '${SPEC_PLAN_FILE}' 기반 문서별 생성/검증 시작${NC}"
+echo -e "${BLUE}======================================================================${NC}"
+echo -e " - 계획 파일   : ${CYAN}${ABS_SPEC_PLAN_FILE}${NC}"
+echo -e " - 저장 폴더   : ${CYAN}${ABS_SPEC_DIR}${NC}"
+echo -e " - 진행 현황   : 전체 ${BOLD}${TOTAL_DOCS}${NC}개 중 완료 ${GREEN}${INITIAL_COMPLETED}${NC}개 / 미완료 ${YELLOW}${INITIAL_REMAINING}${NC}개"
+echo -e " - 충돌 처리   : ${CYAN}${ON_CONFLICT}${NC} (결정 기록: ${ABS_DECISIONS_FILE})"
+echo -e " - 최대 문서수 : ${CYAN}${MAX_STEPS}${NC} (문서당 최대 ${MAX_TURNS}턴, 재시도 ${MAX_RETRIES}회)"
+echo -e "${BLUE}======================================================================${NC}"
+
+if [[ "$INITIAL_REMAINING" -eq 0 ]]; then
+  echo -e "${GREEN}[완료] '${SPEC_PLAN_FILE}'의 모든 문서가 이미 완료(- [x])되었습니다!${NC}"
+else
+  STEP_COUNT=0
+  while [[ "$STEP_COUNT" -lt "$MAX_STEPS" ]]; do
+    REMAINING_BEFORE=$(count_remaining_tasks "$ABS_SPEC_PLAN_FILE")
+    if [[ "$REMAINING_BEFORE" -eq 0 ]]; then
+      echo -e "\n${GREEN}[성공] '${SPEC_PLAN_FILE}'의 모든 문서가 생성되었습니다!${NC}"
+      break
+    fi
+
+    STEP_COUNT=$((STEP_COUNT + 1))
+    NEXT_TASK=$(get_next_task "$ABS_SPEC_PLAN_FILE")
+    COMPLETED_NOW=$(count_completed_tasks "$ABS_SPEC_PLAN_FILE")
+    TOTAL_NOW=$((COMPLETED_NOW + REMAINING_BEFORE))
+
+    echo -e "\n${CYAN}----------------------------------------------------------------------${NC}"
+    echo -e "${CYAN}[문서 ${STEP_COUNT}/${MAX_STEPS}] 전체 진행도: ${COMPLETED_NOW}/${TOTAL_NOW} 완료 (남은 문서: ${REMAINING_BEFORE}개)${NC}"
+    echo -e "${YELLOW}▶ 현재 작성 문서:${NC} ${NEXT_TASK}"
+    echo -e "${CYAN}----------------------------------------------------------------------${NC}"
+
+    if ! run_document_step "$NEXT_TASK"; then
+      send_ubuntu_notification "Claude Spec Generator 오류 중단" "'${NEXT_TASK}' 문서 생성에서 오류가 발생해 중단되었습니다." "critical"
+      exit 1
+    fi
+
+    if [[ "$AUTO_COMMIT" == "true" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      if [[ -n "$(git status --porcelain "$LAST_STEP_DOC_PATH" "$ABS_SPEC_PLAN_FILE" 2>/dev/null)" ]]; then
+        git add "$LAST_STEP_DOC_PATH" "$ABS_SPEC_PLAN_FILE"
+        git commit -m "docs(spec): generate $(short_task "$NEXT_TASK")" || true
+        echo -e "${BLUE}[Git] 문서 생성 체크포인트 커밋이 생성되었습니다.${NC}"
+      fi
+    fi
+  done
+fi
+
+FINAL_REMAINING=$(count_remaining_tasks "$ABS_SPEC_PLAN_FILE")
+if [[ "$FINAL_REMAINING" -gt 0 ]]; then
+  echo -e "\n${YELLOW}[종료] 최대 문서 수(${MAX_STEPS})에 도달하여 중단되었습니다. (남은 문서: ${FINAL_REMAINING}개)${NC}"
+  echo -e "${YELLOW}같은 명령으로 다시 실행하면 남은 문서부터 이어서 생성합니다. (문서간 충돌 검증/최종 최적화는 모든 문서가 완료된 뒤 실행됩니다.)${NC}"
+  send_ubuntu_notification "Claude Spec Generator 최대 문서수 도달" "최대 문서 수(${MAX_STEPS})에 도달하여 중단되었습니다." "normal"
+  exit 2
+fi
+
+# 모든 문서가 완료된 경우에만 Stage C/D 진행
+if [[ "$SKIP_CROSS_CHECK" != "true" ]]; then
+  cross_document_conflict_check
+else
+  echo -e "${YELLOW}[건너뜀] --no-cross-check 옵션으로 문서간 충돌 검증을 생략합니다.${NC}"
+fi
+
+if [[ "$SKIP_OPTIMIZE" != "true" ]]; then
+  final_optimize_documents
+else
+  echo -e "${YELLOW}[건너뜀] --no-optimize 옵션으로 최종 최적화를 생략합니다.${NC}"
 fi
 
 echo -e "\n${GREEN}======================================================================${NC}"
-echo -e "${BOLD}${GREEN} [완료] 요구사항 사양서가 생성되었습니다!${NC}"
+echo -e "${BOLD}${GREEN} [완료] 요구사항 사양서 문서 세트가 생성되었습니다!${NC}"
 echo -e "${GREEN}======================================================================${NC}"
-echo -e " - 사양서 경로 : ${CYAN}${ABS_SPEC_FILE}${NC}"
+echo -e " - 계획 파일   : ${CYAN}${ABS_SPEC_PLAN_FILE}${NC}"
+echo -e " - 문서 폴더   : ${CYAN}${ABS_SPEC_DIR}${NC}"
 echo -e " - 결정 기록   : ${CYAN}${ABS_DECISIONS_FILE}${NC} (없으면 모호성 없이 완료됨)"
-echo -e " - 다음 단계   : ${CYAN}run_plan.bash --req-file ${SPEC_FILE_REL}${NC} 로 구현을 시작할 수 있습니다."
+echo -e "${CYAN}$(find "$ABS_SPEC_DIR" -type f -name "*.md" 2>/dev/null | sed "s#^${WORK_DIR}/##" | sort)${NC}"
+echo -e " - 다음 단계   : ${CYAN}run_plan.bash --req-file <위 문서 중 하나>${NC} 로 구현을 시작할 수 있습니다."
 echo -e "${GREEN}======================================================================${NC}"
 
-send_ubuntu_notification "Claude Spec Generator 완료" "'${SPEC_FILE_REL}' 사양서 생성이 완료되었습니다." "normal"
+send_ubuntu_notification "Claude Spec Generator 완료" "'${SPEC_DIR}' 문서 세트 생성이 완료되었습니다." "normal"
 
 exit 0
