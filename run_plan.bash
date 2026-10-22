@@ -1561,6 +1561,7 @@ ${CONFLICT_POLICY}"
 
   ATTEMPT=0
   STEP_SUCCESS="false"
+  STEP_ORIGINAL_MAX_TURNS="$MAX_TURNS"
 
   while [[ "$ATTEMPT" -le "$MAX_RETRIES" ]]; do
     ATTEMPT=$((ATTEMPT + 1))
@@ -1582,7 +1583,9 @@ ${CONFLICT_POLICY}"
     EXIT_CODE="$LAST_CLAUDE_EXIT_CODE"
 
     if grep -q "Reached max turns" "$LOG_FILE" 2>/dev/null; then
-      echo -e "${YELLOW}[경고] '${NEXT_SHORT}' 단계 수행 중 최대 턴(${MAX_TURNS})에 도달했습니다. --max-turns 값을 늘려 보세요.${NC}"
+      NEXT_MAX_TURNS=$((MAX_TURNS + MAX_TURNS / 2))
+      echo -e "${YELLOW}[경고] '${NEXT_SHORT}' 단계 수행 중 최대 턴(${MAX_TURNS})에 도달했습니다. 다음 재시도부터 ${NEXT_MAX_TURNS}턴으로 늘립니다. (영구적으로 늘리려면 --max-turns 값을 조정하세요)${NC}"
+      MAX_TURNS="$NEXT_MAX_TURNS"
     fi
 
     # 현재 작업 항목이 여전히 미완료(- [ ])로 남아있는지 확인
@@ -1614,6 +1617,8 @@ ${CONFLICT_POLICY}"
 
 ${CONFLICT_POLICY}"
   done
+
+  MAX_TURNS="$STEP_ORIGINAL_MAX_TURNS"
 
   if [[ "$STEP_SUCCESS" != "true" ]]; then
     echo -e "${RED}[중단] '${NEXT_TASK}' 단계를 $((MAX_RETRIES + 1))회 시도했으나 완료되지 않았습니다.${NC}" >&2
