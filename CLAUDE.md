@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This repo holds two self-contained Bash scripts (Ubuntu/GNU-tool oriented, `set -euo pipefail`), both orchestrators that drive the `claude -p` CLI in a loop:
+This repo holds three self-contained Bash scripts (Ubuntu/GNU-tool oriented, `set -euo pipefail`):
 
-- `run_plan.bash` (~1600 lines) — turns requirements into a `plan.md` checklist, then runs one unchecked item per `claude` invocation until all are `- [x]`.
-- `generate_spec.bash` (~1800 lines) — turns a rough requirement into a dev-ready requirements spec **document set** under `spec/`: it plans which documents are needed and where they live (`spec-plan.md`), generates + self-validates each one in a `plan.md`-style checklist loop, then runs two whole-set passes (cross-document conflict check, final dedup/optimize).
+- `run_plan.bash` (~1600 lines) — orchestrator that drives the `claude -p` CLI in a loop: turns requirements into a `plan.md` checklist, then runs one unchecked item per `claude` invocation until all are `- [x]`.
+- `generate_spec.bash` (~1800 lines) — same kind of orchestrator, but turns a rough requirement into a dev-ready requirements spec **document set** under `spec/`: it plans which documents are needed and where they live (`spec-plan.md`), generates + self-validates each one in a `plan.md`-style checklist loop, then runs two whole-set passes (cross-document conflict check, final dedup/optimize).
+- `loop_task.bash` (~500 lines) — a daemon that does *not* call `claude` itself. It watches `task/open/` for requirement `.md` files and feeds them to `run_plan.bash` one at a time, moving each file `task/open/` → `task/in-progress/` → `task/close/` as it progresses. It's a thin queue/supervisor around `run_plan.bash`, not a third copy of the Claude-calling machinery.
 
-`generate_spec.bash` was written by copying `run_plan.bash`'s Slack notification/reply, usage-limit wait, `build_claude_args`, and `[DECISION_REQUIRED]` decision-handling functions near-verbatim, and reshaping its own Phase 1/Phase 2 split to operate on a document-plan file (`spec-plan.md`) instead of `plan.md`, plus two extra whole-set stages after the loop. When changing that shared machinery in one script, check whether the other script needs the same fix.
+`generate_spec.bash` was written by copying `run_plan.bash`'s Slack notification/reply, usage-limit wait, `build_claude_args`, and `[DECISION_REQUIRED]` decision-handling functions near-verbatim, and reshaping its own Phase 1/Phase 2 split to operate on a document-plan file (`spec-plan.md`) instead of `plan.md`, plus two extra whole-set stages after the loop. When changing that shared machinery in one script, check whether the other script needs the same fix. `loop_task.bash` does not copy this machinery — it only copies the `send_ubuntu_notification` helper and the `--tmux` re-exec / `flock` preflight pattern (see its own section below), since it never talks to `claude` directly.
 
 All user-facing strings and prompts are in Korean; keep new messages/prompts in Korean to match.
 
@@ -18,15 +19,17 @@ There is no build, lint, or test setup and no git repo. To validate changes:
 ```bash
 bash -n run_plan.bash                      # syntax check
 bash -n generate_spec.bash
-shellcheck run_plan.bash generate_spec.bash  # if installed
+bash -n loop_task.bash
+shellcheck run_plan.bash generate_spec.bash loop_task.bash  # if installed
 ./run_plan.bash --dry-run -q "req"         # prints the claude command + prompts without calling claude
 ./generate_spec.bash --dry-run -q "req"    # same, for the spec generator
-./run_plan.bash --check-env                # diagnose environment, then exit (generate_spec.bash has the same flag)
+./loop_task.bash --dry-run                 # shows what it would move/run against the current task/ state, no side effects
+./run_plan.bash --check-env                # diagnose environment, then exit (other two scripts have the same flag)
 ./run_plan.bash --init-sample              # write a sample plan.md and exit
-./run_plan.bash --help                     # generate_spec.bash --help for the other script
+./run_plan.bash --help                     # generate_spec.bash/loop_task.bash --help for the other scripts
 ```
 
-`--dry-run` is the safest way to exercise prompt construction; note it exits after printing the first step's prompt (run_plan.bash) or the draft prompt (generate_spec.bash).
+`--dry-run` is the safest way to exercise prompt construction; note it exits after printing the first step's prompt (run_plan.bash) or the draft prompt (generate_spec.bash). For `loop_task.bash`, `--dry-run` runs exactly one iteration of the monitoring loop body (no mkdir side effects beyond the always-created `task/{open,in-progress,close}` dirs) and prints the `run_plan.bash` invocation it would make, then exits — it does not actually loop or move files.
 
 ## Architecture
 
@@ -51,6 +54,16 @@ Flow of the script, top to bottom:
 
 Both Stage C and Stage D can themselves hit `[DECISION_REQUIRED]` or a usage limit, since they also go through `run_claude_with_limit_guard`. `get_conflict_policy_instruction` takes a `target_desc` argument (e.g. `"'${doc_abs}'"` or `"'${ABS_SPEC_DIR}' 내 관련 문서들"`) instead of hardcoding one file, since the "작업 대상" differs per stage. Because there *is* a checklist loop again (over documents, not code steps), `MAX_STEPS`/exit code 2 apply here too, same as `run_plan.bash` — re-running after a `MAX_STEPS` stop resumes mid-checklist and only runs Stage C/D once `spec-plan.md` has zero remaining items.
 
+### `loop_task.bash`
+
+This one is a supervisor, not a prompt-building orchestrator — it never constructs a `claude` prompt and has none of `run_claude_with_limit_guard`/Slack-decision/limit-wait machinery. Its whole job is: watch `task/open/`, hand files to `run_plan.bash` one at a time, move them based on that child process's exit code.
+
+- **Single-active-task invariant**: each loop iteration calls `current_in_progress_doc` (first `*.md` in `task/in-progress/`, there should only ever be 0 or 1) before even looking at `task/open/`. If one exists, that's the active doc for this iteration (resume: no `--req-file`, since `plan.md` already has it mid-checklist); only if `in-progress` is empty does it pull the oldest file from `open` (`find -printf '%T@ %p\n' | sort -n`, i.e. FIFO by mtime) via `safe_move`, which appends a timestamp suffix instead of clobbering if the destination name collides. This invariant is what makes "resume on restart" and "never run two `run_plan.bash` in this dir at once" the same code path — don't special-case startup separately from steady-state looping.
+- **Exit-code handling is binary, not per-code**: `process_requirement_doc` only checks `rc -eq 0` (→ move to `task/close/`) vs. everything else (→ leave in `task/in-progress/`, sleep `FAIL_RETRY_DELAY`, loop again). It does not distinguish `run_plan.bash`'s own exit 1/2/3/4 — a `MAX_STEPS` stop (2) and a paused decision (4) both just mean "not done yet, try again later." This is intentional: retrying is exactly `run_plan.bash` with no new `--req-file`, which is also exactly how a human would resume it by hand.
+- **`--` passthrough**: everything after a literal `--` on `loop_task.bash`'s own command line goes into `RUN_PLAN_EXTRA_ARGS` and is appended, verbatim, to *every* `run_plan.bash` invocation (new or resumed). This is the only way to pass `--auto-commit`, `--on-conflict`, `-m`, Slack flags, etc. through — there's no mirrored flag for each one. Slack env vars (`SLACK_BOT_TOKEN`, …) don't need this at all; they're inherited by the child process automatically.
+- **No Slack calls of its own**: unlike the other two scripts, `loop_task.bash` doesn't define `slack_notify_progress`/`slack_post`. The Slack visibility you get (Phase/Step progress, decision alerts) comes entirely from the `run_plan.bash` child process it launches, since env vars propagate to subprocesses for free. Keep it that way — adding a second, redundant notification path here would just double up messages.
+- **Daemon control reuses the `--tmux` re-exec block verbatim** from `run_plan.bash`/`generate_spec.bash` (same `ORIGINAL_ARGS` filtering, same `tmux new-session -d -c "$WORK_DIR"`), so staying async is "the same trick as the other two scripts," not a new mechanism. On top of that it adds a `flock`-protected PID file (`$LOG_DIR/loop_task.pid`, removed via `trap ... EXIT`) so `--stop`/`--status` work regardless of whether the process was started via `--tmux`, plain `nohup`, or systemd.
+
 ## Conventions and gotchas
 
 - The script's control flow depends on Claude editing `plan.md` checkboxes and on log-text markers (`[DECISION_REQUIRED]`, limit-message regexes). Changing prompt wording, marker names, or the checkbox grep patterns (`^[[:space:]]*[-*][[:space:]]+\[...\]`) must be done consistently across the prompt text and the detection functions.
@@ -59,6 +72,6 @@ Both Stage C and Stage D can themselves hit `[DECISION_REQUIRED]` or a usage lim
 - Functions that return values via globals: `CLAUDE_ARGS`, `LAST_CLAUDE_EXIT_CODE`, `USER_DECISION_INPUT`. Under `set -e`, `claude` calls are wrapped in `set +e`/`set -e` and use `PIPESTATUS[0]` because of the `| tee`.
 - `trap '' HUP` is intentional so SSH disconnects don't kill long waits.
 - Default permission strategy is `bypass` (`--dangerously-skip-permissions`); runs as root are auto-switched to `auto`.
-- Intended use: install the script(s) somewhere on `PATH` and run from inside the target project folder. The base path is the caller's cwd (`WORK_DIR`), never the script's location: `plan.md`/`spec/`, `decisions.md`, `.claude-plan-logs/`|`.claude-spec-logs/` (logs, backups, lock) and the `claude` working dir all live in the project. Don't `cd` away or resolve paths relative to the script; use `SCRIPT_PATH` (symlink-resolved) only for self re-exec (`--tmux`, which starts the session in `WORK_DIR`).
+- Intended use: install the script(s) somewhere on `PATH` and run from inside the target project folder. The base path is the caller's cwd (`WORK_DIR`), never the script's location: `plan.md`/`spec/`/`task/`, `decisions.md`, `.claude-plan-logs/`|`.claude-spec-logs/`|`.claude-loop-task-logs/` (logs, backups, lock/PID files) and the `claude` working dir all live in the project. Don't `cd` away or resolve paths relative to the script; use `SCRIPT_PATH` (symlink-resolved) only for self re-exec (`--tmux`, which starts the session in `WORK_DIR`). `loop_task.bash` never passes a `--plan`/`-f` or any other path override to `run_plan.bash` — it relies on invoking it with the *same* `WORK_DIR` (no `cd`) so the child naturally uses its own default `plan.md`/`decisions.md` there, which is what makes "just call `run_plan.bash` again with no args" a valid resume.
 - `generate_spec.bash`'s `get_step_filepath` parses `### Step N` → `파일 경로:` with `awk`, using mawk (Ubuntu's default `/usr/bin/awk`), not gawk. mawk mishandles multi-byte UTF-8 characters inside bracket expressions (`[^:：]` silently matches wrong byte offsets); the fix was to find the colon with `index()` instead of a `[^:：]` regex. Avoid introducing new `[^...]`/`[...]` character classes containing non-ASCII characters anywhere in this file's `awk` scripts — test with plain `/usr/bin/awk`, not just gawk, since gawk won't reproduce the bug.
 - `generate_spec.bash`'s `spec-plan.md` checkbox/Step-number grep patterns (`^[[:space:]]*[-*][[:space:]]+\[...\]`, `Step[[:space:]]+[0-9]+:`) are the same family as `run_plan.bash`'s `plan.md` patterns — kept deliberately so `count_remaining_tasks`/`count_completed_tasks`/`get_next_task` work unchanged on either file (they just take the file path as an argument now instead of reading a global). The one new format rule is the `### Step N` section's `파일 경로:` line, which must stay literally spelled that way (or `get_step_filepath`'s `grab`/match logic and the planning/normalize prompts need to change together).

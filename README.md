@@ -275,3 +275,65 @@ run_plan.bash --req-file spec/02-functional-requirements.md
 | 2 | 최대 문서 수(`--max-steps`) 도달 — 같은 명령으로 재실행하면 이어서 생성 |
 | 3 | 사용량 한도 도달 (`--no-limit-wait`) |
 | 4 | 의사결정 대기로 일시 정지 |
+
+---
+
+# loop_task.bash
+
+`task/open/` 폴더를 계속 감시하다가 요구사항 md 문서가 들어오면 `run_plan.bash`에 전달해 자동으로 구현을 진행시키는 **데몬 스크립트**입니다. 문서를 큐에 넣어두기만 하면 되는 "요구사항 투입 → 자동 구현" 파이프라인을 만들어 줍니다.
+
+1. **모니터링**: `task/open/`을 계속 감시합니다(`inotifywait` 설치 시 즉시 감지, 없으면 `--poll-interval`초 폴링).
+2. **진행 중 표시**: 새 문서를 발견하면 `task/in-progress/`로 옮기고 `run_plan.bash --req-file <문서>`로 계획 수립부터 단계별 구현까지 맡깁니다.
+3. **완료 처리**: `run_plan.bash`가 종료 코드 0(모든 단계 완료)으로 끝나면 문서를 `task/close/`로 옮깁니다. 그 외 종료 코드면 문서를 `task/in-progress/`에 그대로 두고 `--fail-retry-delay`초 후 다시 시도합니다.
+4. **재개**: 데몬을 (재)시작할 때 `task/in-progress/`에 문서가 이미 있으면 완료되지 못한 이전 작업으로 간주해, 그 문서는 다시 옮기지 않고 `run_plan.bash`를 요구사항 없이 호출해 기존 `plan.md`를 이어서 진행합니다 (한 번에 한 작업만 진행 — `in-progress`가 비어 있어야 `open`의 다음 문서를 집어갑니다).
+5. **비동기 실행**: 다른 두 스크립트와 동일한 `--tmux` 옵션으로 데몬을 detached tmux 세션에서 백그라운드로 띄울 수 있고, `--stop`/`--status`로 PID 파일 기준 제어가 가능합니다.
+
+`run_plan.bash`가 자식 프로세스로 실행되므로, `SLACK_BOT_TOKEN`/`SLACK_CHANNEL` 등 환경변수를 export해 두면 각 작업의 Phase/Step 진행 상황과 의사결정 알림이 평소와 동일하게 Slack으로도 전달됩니다 — `loop_task.bash` 자체는 별도 Slack 연동이 필요 없습니다.
+
+## 사용 예
+
+```bash
+# 포그라운드에서 데몬 실행 (Ctrl+C로 종료)
+./loop_task.bash
+
+# tmux 백그라운드 세션에서 시작, 작업마다 자동 커밋 + 충돌 시 자율 결정
+# ('--' 뒤의 옵션은 매 작업마다 run_plan.bash 호출에 그대로 전달됩니다)
+./loop_task.bash --tmux -- --auto-commit --on-conflict auto
+
+# 상태 확인 / 종료
+./loop_task.bash --status
+./loop_task.bash --stop
+
+# 대기/미완료 작업을 하나만 처리하고 종료 (cron, 디버깅)
+./loop_task.bash --once
+
+# 실제로 옮기거나 호출하지 않고 지금 상태에서 어떤 동작이 일어날지만 확인
+./loop_task.bash --dry-run
+
+# 요구사항 문서를 큐에 투입
+echo "로그인 API에 rate limit 추가" > task/open/rate-limit.md
+```
+
+## 주요 옵션
+
+| 옵션 | 설명 |
+|---|---|
+| `--task-dir` | 작업 큐 폴더 (기본 `task`; 하위 `open`/`in-progress`/`close` 자동 생성) |
+| `--poll-interval` | `task/open` 확인 주기(초, 기본 10) — `inotifywait` 설치 시 더 빠르게 감지 |
+| `--fail-retry-delay` | 실패/중단 후 재시도 전 대기 시간(초, 기본 60) |
+| `--run-plan-bin` | `run_plan.bash` 경로 직접 지정 (기본: PATH 탐색 → 이 스크립트와 같은 폴더) |
+| `--once` | 대기 중인 작업을 최대 1개(재개 포함)만 처리하고 종료 |
+| `--tmux [세션명]`, `--stop`, `--status` | tmux 백그라운드 시작 / PID 파일 기준 종료·상태 확인 |
+| `--check-env`, `--dry-run` | 환경 진단 / 실제 이동·호출 없이 동작 미리보기 |
+| `-- <run_plan.bash 옵션...>` | 매 작업마다 `run_plan.bash` 호출에 그대로 추가되는 옵션 (예: `--auto-commit`, `--on-conflict auto`, `-m opus` 등 모든 옵션 가능) |
+
+## 디렉터리 구조
+
+```
+task/
+├── open/         # 요구사항 md 문서를 넣어두는 곳 (사용자가 채움)
+├── in-progress/  # 현재 run_plan.bash가 작업 중인 문서 (최대 1개)
+└── close/        # run_plan.bash가 모든 단계를 완료한 문서
+```
+
+같은 폴더에서 동시에 데몬이 두 개 뜨는 것은 `flock`(`.claude-loop-task-logs/loop_task.lock`)으로 막혀 있습니다. `run_plan.bash`도 자체적으로 작업 디렉터리당 하나의 인스턴스만 허용하므로, `loop_task.bash`는 언제나 "한 번에 하나의 작업"만 진행합니다.
