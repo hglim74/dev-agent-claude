@@ -763,6 +763,14 @@ for m in r.get("messages", []):
         break' "$thread_ts" || true
 }
 
+# 각 단계 시작/종료, 전체 작업 완료 등 진행 상황을 Slack으로 전달 (응답을 기다리지 않는 단방향 알림).
+# 전송 실패해도 전체 흐름에 영향을 주지 않도록 항상 성공으로 반환한다.
+slack_notify_progress() {
+  local text="$1"
+  slack_notify_enabled || return 0
+  slack_post "$text" >/dev/null 2>&1 || true
+}
+
 # 의사결정 필요 상황 발생 시 사용자에게 묻거나(ask) 안전 정지(pause) 처리
 # 반환값: 사용자 결정 텍스트가 전역 변수 USER_DECISION_INPUT에 저장됨
 handle_decision_required() {
@@ -1318,6 +1326,11 @@ generate_plan_from_requirements() {
   echo -e "${BOLD}${BLUE} [Phase 1] 요구사항 분석 및 '${PLAN_FILE}' 실행 계획 수립${NC}"
   echo -e "${BLUE}======================================================================${NC}"
 
+  if [[ "$DRY_RUN" != "true" ]]; then
+    slack_notify_progress ":rocket: *[Phase 1 시작]* 요구사항 분석 및 \`${PLAN_FILE}\` 실행 계획 수립을 시작합니다.
+• 프로젝트: ${WORK_DIR}"
+  fi
+
   # 기존 plan.md 백업 처리
   if [[ -f "$ABS_PLAN_FILE" && "$PLAN_MODE_ACTION" == "overwrite" && "$DRY_RUN" != "true" ]]; then
     local backup_file="${LOG_DIR}/$(basename "$PLAN_FILE").bak.$(date +"%Y%m%d_%H%M%S")"
@@ -1398,6 +1411,7 @@ ${conflict_policy}"
     exit 1
   fi
   echo -e "\n${GREEN}[계획 수립 완료] '${PLAN_FILE}'에 총 ${total_created}개의 실행 단계가 준비되었습니다.${NC}"
+  slack_notify_progress ":white_check_mark: *[Phase 1 완료]* \`${PLAN_FILE}\`에 총 ${total_created}개의 실행 단계가 준비되었습니다."
 
   if [[ "$AUTO_COMMIT" == "true" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if [[ -n "$(git status --porcelain "$ABS_PLAN_FILE" "$ABS_DECISIONS_FILE" 2>/dev/null)" ]]; then
@@ -1501,6 +1515,7 @@ echo -e "${BLUE}================================================================
 
 if [[ "$INITIAL_REMAINING" -eq 0 ]]; then
   echo -e "${GREEN}[완료] '${PLAN_FILE}'의 모든 항목이 이미 완료(- [x])되었습니다!${NC}"
+  slack_notify_progress ":white_check_mark: *[전체 작업 완료]* \`${PLAN_FILE}\`의 모든 항목이 이미 완료(- [x])되어 있어 추가 작업 없이 종료합니다."
   exit 0
 fi
 
@@ -1512,6 +1527,7 @@ while [[ "$STEP_COUNT" -lt "$MAX_STEPS" ]]; do
   if [[ "$REMAINING_BEFORE" -eq 0 ]]; then
     echo -e "\n${GREEN}[성공] '${PLAN_FILE}'의 모든 단계가 완료되었습니다!${NC}"
     send_ubuntu_notification "Claude Plan 완료" "'${PLAN_FILE}'의 모든 단계가 성공적으로 완료되었습니다!" "normal"
+    slack_notify_progress ":tada: *[전체 작업 완료]* \`${PLAN_FILE}\`의 모든 단계(총 $((STEP_COUNT))단계)가 성공적으로 완료되었습니다!"
     exit 0
   fi
 
@@ -1524,6 +1540,11 @@ while [[ "$STEP_COUNT" -lt "$MAX_STEPS" ]]; do
   echo -e "${CYAN}[Step ${STEP_COUNT}/${MAX_STEPS}] 전체 진행도: ${COMPLETED_NOW}/${TOTAL_NOW} 완료 (남은 단계: ${REMAINING_BEFORE}개)${NC}"
   echo -e "${YELLOW}▶ 현재 수행 단계:${NC} ${NEXT_TASK}"
   echo -e "${CYAN}----------------------------------------------------------------------${NC}"
+
+  if [[ "$DRY_RUN" != "true" ]]; then
+    slack_notify_progress ":arrow_forward: *[Step ${STEP_COUNT}/${MAX_STEPS} 시작]* ${NEXT_TASK}
+• 진행도: ${COMPLETED_NOW}/${TOTAL_NOW} 완료 (남은 단계: ${REMAINING_BEFORE}개)"
+  fi
 
   USE_CONT="false"
   if [[ "$CONTINUE_SESSION" == "true" && "$STEP_COUNT" -gt 1 ]]; then
@@ -1608,6 +1629,8 @@ ${CONFLICT_POLICY}"
       STEP_SUCCESS="true"
       REMAINING_AFTER=$(count_remaining_tasks)
       echo -e "${GREEN}[단계 완료] '${NEXT_TASK}' 완료! (남은 항목: ${REMAINING_AFTER}개)${NC}"
+      slack_notify_progress ":white_check_mark: *[Step ${STEP_COUNT}/${MAX_STEPS} 완료]* ${NEXT_TASK}
+• 남은 단계: ${REMAINING_AFTER}개"
       break
     fi
 
@@ -1624,6 +1647,8 @@ ${CONFLICT_POLICY}"
     echo -e "${RED}[중단] '${NEXT_TASK}' 단계를 $((MAX_RETRIES + 1))회 시도했으나 완료되지 않았습니다.${NC}" >&2
     echo -e "${RED}마지막 로그 파일을 확인해 주세요: ${LOG_FILE}${NC}" >&2
     send_ubuntu_notification "Claude Plan 오류 중단" "'${NEXT_TASK}' 단계에서 오류가 발생해 중단되었습니다." "critical"
+    slack_notify_progress ":x: *[Step ${STEP_COUNT}/${MAX_STEPS} 실패]* ${NEXT_TASK}
+• $((MAX_RETRIES + 1))회 시도 후에도 완료되지 않아 중단합니다."
     exit 1
   fi
 
@@ -1643,9 +1668,12 @@ FINAL_REMAINING=$(count_remaining_tasks)
 if [[ "$FINAL_REMAINING" -eq 0 ]]; then
   echo -e "\n${GREEN}[성공] 모든 단계(총 ${STEP_COUNT}단계)를 완료했습니다!${NC}"
   send_ubuntu_notification "Claude Plan 완료" "총 ${STEP_COUNT}단계를 모두 완료했습니다!" "normal"
+  slack_notify_progress ":tada: *[전체 작업 완료]* 총 ${STEP_COUNT}단계를 모두 완료했습니다!"
   exit 0
 else
   echo -e "\n${YELLOW}[종료] 최대 단계 횟수(${MAX_STEPS})에 도달하여 중단되었습니다. (남은 항목: ${FINAL_REMAINING}개)${NC}"
   send_ubuntu_notification "Claude Plan 최대 단계 도달" "최대 단계 횟수(${MAX_STEPS})에 도달하여 중단되었습니다." "normal"
+  slack_notify_progress ":warning: *[작업 중단]* 최대 단계 횟수(${MAX_STEPS})에 도달하여 중단되었습니다. (남은 항목: ${FINAL_REMAINING}개)
+같은 명령으로 다시 실행하면 이어서 진행됩니다."
   exit 2
 fi

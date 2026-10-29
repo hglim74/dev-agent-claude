@@ -713,6 +713,14 @@ for m in r.get("messages", []):
         break' "$thread_ts" || true
 }
 
+# 각 단계/Stage 시작·종료, 전체 작업 완료 등 진행 상황을 Slack으로 전달 (응답을 기다리지 않는
+# 단방향 알림). 전송 실패해도 전체 흐름에 영향을 주지 않도록 항상 성공으로 반환한다.
+slack_notify_progress() {
+  local text="$1"
+  slack_notify_enabled || return 0
+  slack_post "$text" >/dev/null 2>&1 || true
+}
+
 # 의사결정 필요 상황 발생 시 사용자에게 묻거나(ask) 안전 정지(pause) 처리
 # 반환값: 사용자 결정 텍스트가 전역 변수 USER_DECISION_INPUT에 저장됨
 handle_decision_required() {
@@ -1380,6 +1388,11 @@ generate_spec_plan() {
   echo -e "${BOLD}${BLUE} [문서 계획 수립] 요구사항 분석 및 '${SPEC_PLAN_FILE}' 생성${NC}"
   echo -e "${BLUE}======================================================================${NC}"
 
+  if [[ "$DRY_RUN" != "true" ]]; then
+    slack_notify_progress ":rocket: *[Stage A 시작]* 요구사항 분석 및 \`${SPEC_PLAN_FILE}\` 문서 계획 수립을 시작합니다.
+• 프로젝트: ${WORK_DIR}"
+  fi
+
   if [[ -f "$ABS_SPEC_PLAN_FILE" && "$PLAN_MODE_ACTION" == "overwrite" && "$DRY_RUN" != "true" ]]; then
     local backup_file="${LOG_DIR}/$(basename "$SPEC_PLAN_FILE").bak.$(date +"%Y%m%d_%H%M%S")"
     cp "$ABS_SPEC_PLAN_FILE" "$backup_file"
@@ -1459,6 +1472,7 @@ ${conflict_policy}"
   local total_created
   total_created=$(count_remaining_tasks "$ABS_SPEC_PLAN_FILE")
   echo -e "\n${GREEN}[계획 수립 완료] '${SPEC_PLAN_FILE}'에 총 ${total_created}개의 생성할 문서가 계획되었습니다.${NC}"
+  slack_notify_progress ":white_check_mark: *[Stage A 완료]* \`${SPEC_PLAN_FILE}\`에 총 ${total_created}개의 생성할 문서가 계획되었습니다."
 
   if [[ "$AUTO_COMMIT" == "true" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if [[ -n "$(git status --porcelain "$ABS_SPEC_PLAN_FILE" "$ABS_DECISIONS_FILE" 2>/dev/null)" ]]; then
@@ -1563,6 +1577,8 @@ ${conflict_policy}"
 
   if [[ "$success" == "true" ]]; then
     echo -e "${GREEN}[문서 완료] Step ${step_num}: '${next_short}' → '${doc_rel}'${NC}"
+    slack_notify_progress ":white_check_mark: *[Stage B / 문서 ${STEP_COUNT}/${MAX_STEPS} 완료]* Step ${step_num}: ${next_short}
+• 저장 경로: \`${doc_rel}\`"
     return 0
   fi
 
@@ -1587,6 +1603,8 @@ cross_document_conflict_check() {
   echo -e "\n${BLUE}======================================================================${NC}"
   echo -e "${BOLD}${BLUE} [문서간 충돌 검증] 완성된 문서 세트의 모순/불일치를 검토합니다${NC}"
   echo -e "${BLUE}======================================================================${NC}"
+
+  slack_notify_progress ":mag: *[Stage C 시작]* 완성된 문서 세트($(echo "$doc_list" | wc -l)개)의 모순/불일치를 검토합니다."
 
   local doc_list_rel
   doc_list_rel=$(echo "$doc_list" | sed "s#^${WORK_DIR}/##")
@@ -1627,6 +1645,7 @@ ${conflict_policy}"
     "문서간 충돌 검증"
 
   echo -e "${GREEN}[완료] 문서간 충돌 검증이 끝났습니다.${NC}"
+  slack_notify_progress ":white_check_mark: *[Stage C 완료]* 문서간 충돌 검증이 끝났습니다."
 }
 
 # ==============================================================================
@@ -1645,6 +1664,8 @@ final_optimize_documents() {
   echo -e "\n${BLUE}======================================================================${NC}"
   echo -e "${BOLD}${BLUE} [최종 최적화] 문서 세트의 중복/잔여 충돌을 정리하고 인덱스를 만듭니다${NC}"
   echo -e "${BLUE}======================================================================${NC}"
+
+  slack_notify_progress ":sparkles: *[Stage D 시작]* 문서 세트의 중복/잔여 충돌을 정리하고 인덱스를 만듭니다."
 
   local doc_list_rel
   doc_list_rel=$(echo "$doc_list" | sed "s#^${WORK_DIR}/##")
@@ -1682,6 +1703,7 @@ ${conflict_policy}"
     "최종 중복/충돌 검사 및 최적화"
 
   echo -e "${GREEN}[완료] 최종 최적화가 끝났습니다.${NC}"
+  slack_notify_progress ":white_check_mark: *[Stage D 완료]* 최종 최적화가 끝났습니다."
 
   if [[ "$AUTO_COMMIT" == "true" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if [[ -n "$(git status --porcelain "$ABS_SPEC_DIR" "$ABS_DECISIONS_FILE" 2>/dev/null)" ]]; then
@@ -1791,8 +1813,13 @@ else
     echo -e "${YELLOW}▶ 현재 작성 문서:${NC} ${NEXT_TASK}"
     echo -e "${CYAN}----------------------------------------------------------------------${NC}"
 
+    slack_notify_progress ":arrow_forward: *[Stage B / 문서 ${STEP_COUNT}/${MAX_STEPS} 시작]* ${NEXT_TASK}
+• 진행도: ${COMPLETED_NOW}/${TOTAL_NOW} 완료 (남은 문서: ${REMAINING_BEFORE}개)"
+
     if ! run_document_step "$NEXT_TASK"; then
       send_ubuntu_notification "Claude Spec Generator 오류 중단" "'${NEXT_TASK}' 문서 생성에서 오류가 발생해 중단되었습니다." "critical"
+      slack_notify_progress ":x: *[Stage B / 문서 ${STEP_COUNT}/${MAX_STEPS} 실패]* ${NEXT_TASK}
+• 재시도 소진 후에도 완료되지 않아 중단합니다."
       exit 1
     fi
 
@@ -1811,6 +1838,8 @@ if [[ "$FINAL_REMAINING" -gt 0 ]]; then
   echo -e "\n${YELLOW}[종료] 최대 문서 수(${MAX_STEPS})에 도달하여 중단되었습니다. (남은 문서: ${FINAL_REMAINING}개)${NC}"
   echo -e "${YELLOW}같은 명령으로 다시 실행하면 남은 문서부터 이어서 생성합니다. (문서간 충돌 검증/최종 최적화는 모든 문서가 완료된 뒤 실행됩니다.)${NC}"
   send_ubuntu_notification "Claude Spec Generator 최대 문서수 도달" "최대 문서 수(${MAX_STEPS})에 도달하여 중단되었습니다." "normal"
+  slack_notify_progress ":warning: *[작업 중단]* 최대 문서 수(${MAX_STEPS})에 도달하여 중단되었습니다. (남은 문서: ${FINAL_REMAINING}개)
+같은 명령으로 다시 실행하면 이어서 진행됩니다."
   exit 2
 fi
 
@@ -1838,5 +1867,7 @@ echo -e " - 다음 단계   : ${CYAN}run_plan.bash --req-file <위 문서 중 �
 echo -e "${GREEN}======================================================================${NC}"
 
 send_ubuntu_notification "Claude Spec Generator 완료" "'${SPEC_DIR}' 문서 세트 생성이 완료되었습니다." "normal"
+slack_notify_progress ":tada: *[전체 작업 완료]* \`${SPEC_DIR}\` 문서 세트 생성이 완료되었습니다.
+$(find "$ABS_SPEC_DIR" -type f -name "*.md" 2>/dev/null | sed "s#^${WORK_DIR}/##;s#^#• #" | sort)"
 
 exit 0

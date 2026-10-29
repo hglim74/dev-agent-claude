@@ -93,7 +93,7 @@ run_plan.bash --dry-run -q "요구사항"
 
 ## Slack 연동
 
-의사결정이 필요할 때 Slack으로 알림을 보내고 **스레드 답글**로 답변을 받습니다.
+의사결정이 필요할 때 Slack으로 알림을 보내고 **스레드 답글**로 답변을 받습니다. 그 외에도 각 단계/Stage의 시작·종료와 전체 작업 완료(또는 중단) 시점마다 진행 상황을 Slack으로 단방향 알림(답글 불필요)으로 전달합니다 — `run_plan.bash`는 Phase 1(계획 수립)과 각 Step마다, `generate_spec.bash`는 Stage A~D와 각 문서(Step)마다 전송합니다. `SLACK_BOT_TOKEN`+`SLACK_CHANNEL` 또는 `SLACK_WEBHOOK_URL` 중 하나만 설정되어 있어도 동작하며, 전송에 실패해도 스크립트 흐름에는 영향을 주지 않습니다.
 
 ### 설정 방법 (Bot Token, 양방향)
 
