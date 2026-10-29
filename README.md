@@ -322,6 +322,7 @@ echo "로그인 API에 rate limit 추가" > task/open/rate-limit.md
 | `--poll-interval` | `task/open` 확인 주기(초, 기본 10) — `inotifywait` 설치 시 더 빠르게 감지 |
 | `--fail-retry-delay` | 실패/중단 후 재시도 전 대기 시간(초, 기본 60) |
 | `--run-plan-bin` | `run_plan.bash` 경로 직접 지정 (기본: PATH 탐색 → 이 스크립트와 같은 폴더) |
+| `--run-plan-log-dir` | `run_plan.bash`의 `LOG_DIR` 경로 (기본 `.claude-plan-logs`) — 락 파일 위치 확인용, 커스터마이즈했다면 맞춰야 함 |
 | `--once` | 대기 중인 작업을 최대 1개(재개 포함)만 처리하고 종료 |
 | `--tmux [세션명]`, `--stop`, `--status` | tmux 백그라운드 시작 / PID 파일 기준 종료·상태 확인 |
 | `--check-env`, `--dry-run` | 환경 진단 / 실제 이동·호출 없이 동작 미리보기 |
@@ -337,3 +338,9 @@ task/
 ```
 
 같은 폴더에서 동시에 데몬이 두 개 뜨는 것은 `flock`(`.claude-loop-task-logs/loop_task.lock`)으로 막혀 있습니다. `run_plan.bash`도 자체적으로 작업 디렉터리당 하나의 인스턴스만 허용하므로, `loop_task.bash`는 언제나 "한 번에 하나의 작업"만 진행합니다.
+
+### 재개 체크는 매번 돌지만, 중복 실행은 되지 않습니다
+
+`task/in-progress/` 확인은 최초 1회가 아니라 **루프를 돌 때마다** 수행됩니다. 다만 `run_plan.bash` 호출이 동기(blocking)라서, 한 작업이 끝나기 전에는(`process_requirement_doc`가 리턴하기 전에는) 같은 데몬이 다음 반복으로 넘어가지 않으므로 같은 파일을 중복으로 처리하는 경로 자체가 없습니다.
+
+유일하게 신경 쓸 부분은 데몬 자체가 비정상 종료(`kill -9` 등)된 경우입니다. `run_plan.bash`는 `trap '' HUP`으로 SIGHUP을 무시하므로, 부모(`loop_task.bash`)가 죽어도 그 자식 프로세스는 orphan으로 계속 살아있을 수 있습니다. 이 상태에서 데몬을 재시작하면, `run_plan.bash`를 다시 호출하기 전에 `run_plan.bash` 자신의 락 파일(`<RUN_PLAN_LOG_DIR>/run_plan.lock`, 기본 `.claude-plan-logs/run_plan.lock`)이 아직 잡혀 있는지 먼저 확인합니다. 잡혀 있으면 실패로 집계하지 않고 `--poll-interval`마다 조용히 재확인만 하다가, 락이 풀리는 즉시(orphan 프로세스가 끝나는 즉시) 이어서 진행합니다. `run_plan.bash`의 `LOG_DIR`을 환경변수로 커스터마이즈했다면 `--run-plan-log-dir`(또는 `RUN_PLAN_LOG_DIR` 환경변수)을 같은 값으로 맞춰야 이 감지가 정확히 동작합니다. `--check-env`로 현재 락 상태를 바로 확인할 수 있습니다.

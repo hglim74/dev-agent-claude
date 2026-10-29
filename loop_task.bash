@@ -36,6 +36,7 @@ TASK_DIR="${TASK_DIR:-task}"
 POLL_INTERVAL="${POLL_INTERVAL:-10}"          # task/open 확인 주기(초, inotifywait 없을 때 폴링 간격)
 FAIL_RETRY_DELAY="${FAIL_RETRY_DELAY:-60}"    # run_plan.bash 실패 시 재시도 전 대기 시간(초)
 RUN_PLAN_BIN="${RUN_PLAN_BIN:-}"              # run_plan.bash 실행 파일 경로 (비우면 자동 탐색)
+RUN_PLAN_LOG_DIR="${RUN_PLAN_LOG_DIR:-.claude-plan-logs}" # run_plan.bash의 LOG_DIR(기본값과 동일) - 락 파일 위치 확인용
 LOG_DIR="${LOG_DIR:-.claude-loop-task-logs}"
 ONCE="false"
 DRY_RUN="false"
@@ -72,6 +73,8 @@ usage() {
       --poll-interval <초>     task/open 확인 주기 (기본값: ${POLL_INTERVAL}초; inotifywait 설치 시 더 빠르게 감지)
       --fail-retry-delay <초>  run_plan.bash가 실패/중단으로 끝났을 때 재시도 전 대기 시간 (기본값: ${FAIL_RETRY_DELAY}초)
       --run-plan-bin <경로>    run_plan.bash 실행 파일 경로 (기본값: PATH에서 탐색, 없으면 이 스크립트와 같은 폴더)
+      --run-plan-log-dir <경로> run_plan.bash의 LOG_DIR 경로 (기본값: ${RUN_PLAN_LOG_DIR}; run_plan.bash를 환경변수
+                                LOG_DIR로 커스터마이즈했다면 반드시 같은 값으로 맞춰야 락 상태를 정확히 감지함)
       --once                   대기 중인 작업을 최대 1개(재개 포함)만 처리하고 종료 (테스트/cron용)
 
 데몬 제어 옵션:
@@ -144,6 +147,10 @@ while [[ $# -gt 0 ]]; do
       RUN_PLAN_BIN="$2"
       shift 2
       ;;
+    --run-plan-log-dir)
+      RUN_PLAN_LOG_DIR="$2"
+      shift 2
+      ;;
     --once)
       ONCE="true"
       shift
@@ -209,15 +216,20 @@ WORK_DIR="$(pwd)"
 if command -v realpath >/dev/null 2>&1; then
   ABS_TASK_DIR="$(realpath -m "$TASK_DIR")"
   ABS_LOG_DIR="$(realpath -m "$LOG_DIR")"
+  ABS_RUN_PLAN_LOG_DIR="$(realpath -m "$RUN_PLAN_LOG_DIR")"
 else
   [[ "$TASK_DIR" = /* ]] && ABS_TASK_DIR="$TASK_DIR" || ABS_TASK_DIR="${WORK_DIR}/${TASK_DIR}"
   [[ "$LOG_DIR" = /* ]] && ABS_LOG_DIR="$LOG_DIR" || ABS_LOG_DIR="${WORK_DIR}/${LOG_DIR}"
+  [[ "$RUN_PLAN_LOG_DIR" = /* ]] && ABS_RUN_PLAN_LOG_DIR="$RUN_PLAN_LOG_DIR" || ABS_RUN_PLAN_LOG_DIR="${WORK_DIR}/${RUN_PLAN_LOG_DIR}"
 fi
 OPEN_DIR="${ABS_TASK_DIR}/open"
 IN_PROGRESS_DIR="${ABS_TASK_DIR}/in-progress"
 CLOSE_DIR="${ABS_TASK_DIR}/close"
 PID_FILE="${ABS_LOG_DIR}/loop_task.pid"
 LOCK_FILE="${ABS_LOG_DIR}/loop_task.lock"
+# run_plan.bash가 같은 작업 디렉터리에서 스스로 중복 실행을 막기 위해 쓰는 락 파일.
+# 경로/이름은 run_plan.bash 쪽 구현(LOG_DIR/run_plan.lock)과 반드시 일치해야 한다.
+RUN_PLAN_LOCK_FILE="${ABS_RUN_PLAN_LOG_DIR}/run_plan.lock"
 
 mkdir -p "$OPEN_DIR" "$IN_PROGRESS_DIR" "$CLOSE_DIR" "$ABS_LOG_DIR"
 
@@ -285,6 +297,12 @@ check_environment() {
     echo -e " - run_plan.bash   : ${RED}✗ 찾을 수 없음 (PATH에 설치하거나 --run-plan-bin으로 경로 지정)${NC}"
   fi
 
+  if is_run_plan_locked "$RUN_PLAN_LOCK_FILE"; then
+    echo -e " - run_plan.bash 락: ${YELLOW}⏳ 사용 중 (${RUN_PLAN_LOCK_FILE})${NC} - 다른 run_plan.bash가 이미 실행 중"
+  else
+    echo -e " - run_plan.bash 락: ${GREEN}사용 가능${NC} (${RUN_PLAN_LOCK_FILE})"
+  fi
+
   echo -e " - task 폴더       : ${CYAN}${ABS_TASK_DIR}${NC} (open/in-progress/close)"
   echo -e "${BLUE}======================================================================${NC}"
 }
@@ -312,6 +330,22 @@ resolve_run_plan_bin() {
   fi
 
   return 1
+}
+
+# run_plan.bash의 자체 락 파일(RUN_PLAN_LOCK_FILE)이 "현재" 다른 프로세스에 의해 잡혀 있는지 확인.
+# flock은 프로세스 생존 기간에 묶여 있어서(죽으면 OS가 자동 해제) PID 파일을 직접 읽는 것보다
+# 정확하다 - 데몬이 비정상 종료돼도(run_plan.bash는 trap '' HUP으로 SIGHUP을 무시해 orphan으로
+# 남을 수 있음) 그 orphan이 실제로 살아있는 동안만 "잡혀 있음"으로 판단된다.
+# 서브셸에서 논블로킹으로 획득을 "시도"만 해보고 바로 반납하는 방식이라 실제 락에 영향을 주지 않는다.
+is_run_plan_locked() {
+  local lock_file="$1"
+  [[ -f "$lock_file" ]] || return 1
+  command -v flock >/dev/null 2>&1 || return 1
+  if ( exec 8<>"$lock_file"; flock -n 8 ) 2>/dev/null; then
+    return 1
+  else
+    return 0
+  fi
 }
 
 if [[ "$CHECK_ENV_ONLY" == "true" ]]; then
@@ -435,7 +469,28 @@ process_requirement_doc() {
 
   if [[ "$DRY_RUN" == "true" ]]; then
     echo -e "${YELLOW}[Dry-Run] 실행 예정 명령어:${NC} ${RUN_PLAN_BIN} ${run_plan_args[*]}"
+    if is_run_plan_locked "$RUN_PLAN_LOCK_FILE"; then
+      echo -e "${YELLOW}[Dry-Run 참고] 현재 다른 run_plan.bash 프로세스가 이 디렉터리에서 실행 중입니다 (${RUN_PLAN_LOCK_FILE}). 실제 실행 시에는 그 프로세스가 끝날 때까지 대기합니다.${NC}"
+    fi
     return 0
+  fi
+
+  # run_plan.bash를 호출하기 전에, 같은 작업 디렉터리에서 다른 run_plan.bash 프로세스가
+  # 이미 실행 중인지 확인한다 (예: 이 데몬이 비정상 종료된 뒤 재시작됐지만 이전 run_plan.bash가
+  # orphan으로 계속 살아있는 경우). 실행 중이면 재시도/실패로 치지 않고 조용히 대기만 한다 -
+  # 그대로 호출하면 run_plan.bash 자체 flock에 걸려 즉시 실패하므로, 어차피 실패할 호출을
+  # 반복해 로그/알림을 쌓는 대신 여기서 먼저 걸러낸다.
+  local waited_for_lock="false"
+  while is_run_plan_locked "$RUN_PLAN_LOCK_FILE"; do
+    if [[ "$waited_for_lock" != "true" ]]; then
+      echo -e "${YELLOW}[대기] 같은 작업 디렉터리에서 다른 run_plan.bash 프로세스가 이미 실행 중입니다 (${RUN_PLAN_LOCK_FILE}).${NC}"
+      echo -e "${YELLOW}       끝날 때까지 ${POLL_INTERVAL}초 간격으로 대기합니다 (실패로 집계하지 않음).${NC}"
+      waited_for_lock="true"
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+  if [[ "$waited_for_lock" == "true" ]]; then
+    echo -e "${GREEN}[대기 종료] 락이 해제되어 이어서 진행합니다: ${base}${NC}"
   fi
 
   send_ubuntu_notification "Claude Loop Task" "${base} 작업을 시작합니다 (재개: ${is_resume})." "normal"
