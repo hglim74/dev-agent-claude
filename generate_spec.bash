@@ -1224,6 +1224,7 @@ get_step_filepath() {
         if (idx == 0) idx = index(line, "：")
         if (idx > 0) line = substr(line, idx + 1)
         gsub(/`/, "", line)
+        gsub(/\*/, "", line)
         gsub(/^[[:space:]]+/, "", line)
         gsub(/[[:space:]]+$/, "", line)
         print line
